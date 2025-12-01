@@ -1441,23 +1441,39 @@ def _previous_weekday(start_date: date) -> date:
 def get_last_trading_session_times() -> Tuple[datetime, datetime]:
     """Determine the start and end datetime for the most recent trading session."""
     now = now_ist()
+    # Make sure now is naive datetime for comparison
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    
     market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
     today = now.date()
 
     if today.weekday() >= 5:  # Weekend
         session_day = _previous_weekday(today)
-        return (datetime.combine(session_day, market_open.time()),
-                datetime.combine(session_day, market_close.time()))
+        from_dt = datetime.combine(session_day, market_open.time())
+        to_dt = datetime.combine(session_day, market_close.time())
+        # Ensure dates are not in the future
+        if to_dt > now:
+            to_dt = now
+        return from_dt, to_dt
     
     if market_open <= now <= market_close:
+        # During market hours - use current time as end
         return market_open, now
+    
     if now > market_close:
+        # After market close - use today's session
         return market_open, market_close
     
+    # Before market open - use previous trading day
     session_day = _previous_weekday(today)
-    return (datetime.combine(session_day, market_open.time()),
-            datetime.combine(session_day, market_close.time()))
+    from_dt = datetime.combine(session_day, market_open.time())
+    to_dt = datetime.combine(session_day, market_close.time())
+    # Ensure dates are not in the future
+    if to_dt > now:
+        to_dt = now
+    return from_dt, to_dt
 
 def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tuple[datetime, datetime]:
     """
@@ -3623,21 +3639,45 @@ def _bootstrap_initial_prices(kite_obj: KiteApp):
     logging.info("BOOTSTRAPPING INITIAL PRICES")
     logging.info("=" * 70)
     
-    from_dt, to_dt = get_last_trading_session_times()
+    try:
+        from_dt, to_dt = get_last_trading_session_times()
+        
+        # Validate dates
+        if from_dt is None or to_dt is None:
+            logging.error("Invalid date range from get_last_trading_session_times()")
+            return
+        
+        if from_dt >= to_dt:
+            logging.error(f"Invalid date range: from_dt ({from_dt}) >= to_dt ({to_dt})")
+            return
+        
+        now = now_ist()
+        if to_dt > now:
+            logging.warning(f"to_dt ({to_dt}) is in the future, clamping to now ({now})")
+            to_dt = now
+        
+        logging.info(f"Bootstrap date range: {from_dt} to {to_dt}")
+        
+    except Exception as e:
+        logging.error(f"Failed to get trading session times: {e}", exc_info=True)
+        return
     
     for handler in exchange_handlers.values():
         if not handler.underlying_token:
             continue
         
         try:
+            logging.debug(f"[{handler.exchange}] Fetching historical data for token {handler.underlying_token}")
             candles = kite_obj.historical_data(
                 handler.underlying_token, from_dt, to_dt, 'minute', 
                 continuous=False, oi=True
             )
             
-            if not candles:  # ADD THIS CHECK
-                logging.warning(f"[{handler.exchange}] No historical data available for bootstrap")
+            if not candles:
+                logging.warning(f"[{handler.exchange}] No historical data available for bootstrap (token: {handler.underlying_token}, range: {from_dt} to {to_dt})")
                 continue
+            
+            logging.info(f"[{handler.exchange}] Retrieved {len(candles)} candles for bootstrap")
                 
             latest_candle = next((c for c in reversed(candles) if c.get('close') is not None), None)
             if latest_candle:
@@ -3654,8 +3694,10 @@ def _bootstrap_initial_prices(kite_obj: KiteApp):
                         'last_price': latest_candle.get('close')
                     }
                     handler.latest_oi_data['underlying_price'] = normalized_price
+            else:
+                logging.warning(f"[{handler.exchange}] No valid candle with close price found in {len(candles)} candles")
         except Exception as e:
-            logging.warning(f"[{handler.exchange}] Initial price bootstrap failed: {e}")
+            logging.error(f"[{handler.exchange}] Initial price bootstrap failed: {e}", exc_info=True)
             # Continue anyway - system will use live data when available
 def load_open_positions():
     """Reload open positions from trade log."""

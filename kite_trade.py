@@ -117,7 +117,10 @@ class KiteApp:
             
             # Check for non-200 status codes
             if response.status_code != 200:
-                print(f"Error fetching historical data: HTTP {response.status_code} - {response.text}")
+                error_msg = f"Error fetching historical data: HTTP {response.status_code} - {response.text}"
+                print(error_msg)
+                # Log the actual parameters being sent for debugging
+                print(f"  Token: {instrument_token}, From: {from_date_str}, To: {to_date_str}, Interval: {interval}")
                 return []
 
             data_json = response.json()
