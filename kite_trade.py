@@ -87,8 +87,25 @@ class KiteApp:
         return Exchange
 
     def historical_data(self, instrument_token, from_date, to_date, interval, continuous=False, oi=False):
-        params = {"from": from_date,
-                  "to": to_date,
+        # Format dates to string if they are datetime objects
+        # Zerodha API expects dates in "YYYY-MM-DD HH:MM:SS" format
+        from datetime import datetime
+        
+        def format_date_for_api(dt):
+            """Convert datetime to API-expected string format."""
+            if isinstance(dt, datetime):
+                # If timezone-aware, make it naive (remove timezone info)
+                # The dates should already be in IST, so we just remove tzinfo
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            return str(dt)
+        
+        from_date_str = format_date_for_api(from_date)
+        to_date_str = format_date_for_api(to_date)
+        
+        params = {"from": from_date_str,
+                  "to": to_date_str,
                   "interval": interval,
                   "continuous": 1 if continuous else 0,
                   "oi": 1 if oi else 0}
