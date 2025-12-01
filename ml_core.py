@@ -204,6 +204,32 @@ class MLSignalGenerator:
         except Exception as err:
             logging.warning("[%s] Selector transform failed: %s; using raw features.", self.exchange, err)
             return values
+    
+    def _transform_features_to_dataframe(self, feature_frame: pd.DataFrame) -> pd.DataFrame:
+        """Transform features and return as DataFrame to avoid sklearn warnings."""
+        if self.feature_selector is None:
+            return feature_frame
+        
+        try:
+            # Transform using selector
+            transformed = self.feature_selector.transform(feature_frame.values)
+            if transformed.shape[1] == 0:
+                logging.warning("[%s] Feature selector returned 0 columns, using raw vector.", self.exchange)
+                return feature_frame
+            
+            # Get selected feature names if available
+            if hasattr(self.feature_selector, 'get_support'):
+                selected_indices = self.feature_selector.get_support(indices=True)
+                selected_features = [self.feature_names[i] for i in selected_indices if i < len(self.feature_names)]
+            else:
+                # Fallback: use generic column names
+                selected_features = [f'feature_{i}' for i in range(transformed.shape[1])]
+            
+            # Create DataFrame with proper column names
+            return pd.DataFrame(transformed, columns=selected_features, index=feature_frame.index)
+        except Exception as err:
+            logging.warning("[%s] Selector transform failed: %s; using raw features.", self.exchange, err)
+            return feature_frame
 
     def _fix_hmm_covariance(self):
         """Fix HMM covariance matrices to be positive-definite."""
@@ -326,9 +352,10 @@ class MLSignalGenerator:
             regime_model = self.regime_models.get(current_regime)
             if regime_model is None:
                 return 'HOLD', 0.0, f'No model for regime {current_regime}.', {}
-
-            transformed_vector = self._transform_features(feature_frame.values)
-            probabilities = regime_model.predict_proba(transformed_vector)[0]
+            
+            # Transform features to DataFrame to avoid sklearn warnings about feature names
+            transformed_df = self._transform_features_to_dataframe(feature_frame)
+            probabilities = regime_model.predict_proba(transformed_df)[0]
             class_mapping = regime_model.classes_
             predicted_class_encoded = class_mapping[int(np.argmax(probabilities))]
             
