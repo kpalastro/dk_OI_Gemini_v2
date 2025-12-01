@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.linalg import LinAlgError
 
 import database_new as db
 from risk_manager import get_optimal_position_size
@@ -59,6 +60,9 @@ class MLSignalGenerator:
         # PCR history for Z-score calculation (approx 5 days of minute data)
         self.pcr_history: deque = deque(maxlen=750) 
         self._initialize_pcr_history()
+        
+        # Track last known regime for fallback
+        self.last_regime: Optional[int] = None
 
         self._load_models()
 
@@ -201,6 +205,68 @@ class MLSignalGenerator:
             logging.warning("[%s] Selector transform failed: %s; using raw features.", self.exchange, err)
             return values
 
+    def _fix_hmm_covariance(self):
+        """Fix HMM covariance matrices to be positive-definite."""
+        if self.hmm_model is None:
+            return False
+        
+        try:
+            # Fix covariance matrices for each state
+            if hasattr(self.hmm_model, 'covars_'):
+                min_covar = 1e-6  # Minimum covariance value
+                for i in range(len(self.hmm_model.covars_)):
+                    cov = self.hmm_model.covars_[i]
+                    # Make symmetric
+                    cov = (cov + cov.T) / 2
+                    # Add small diagonal to ensure positive-definite
+                    cov = cov + np.eye(cov.shape[0]) * min_covar
+                    # Ensure it's positive-definite using eigendecomposition
+                    eigenvals, eigenvecs = np.linalg.eigh(cov)
+                    eigenvals = np.maximum(eigenvals, min_covar)
+                    cov = eigenvecs @ np.diag(eigenvals) @ eigenvecs.T
+                    self.hmm_model.covars_[i] = cov
+                return True
+        except Exception as e:
+            logging.warning(f"[{self.exchange}] Failed to fix HMM covariance: {e}")
+            return False
+        return False
+
+    def _predict_regime_safe(self, hmm_input_data: np.ndarray) -> Optional[int]:
+        """Safely predict regime with error handling and covariance fixes."""
+        if self.hmm_model is None:
+            return None
+        
+        try:
+            # Try prediction first
+            predicted_states = self.hmm_model.predict(hmm_input_data)
+            regime = int(predicted_states[-1] if len(predicted_states) > 1 else predicted_states[0])
+            self.last_regime = regime
+            return regime
+        except (ValueError, LinAlgError) as e:
+            # Covariance matrix issue - try to fix and retry
+            logging.warning(f"[{self.exchange}] HMM prediction failed (covariance issue): {e}. Attempting fix...")
+            if self._fix_hmm_covariance():
+                try:
+                    predicted_states = self.hmm_model.predict(hmm_input_data)
+                    regime = int(predicted_states[-1] if len(predicted_states) > 1 else predicted_states[0])
+                    self.last_regime = regime
+                    logging.info(f"[{self.exchange}] HMM prediction succeeded after covariance fix")
+                    return regime
+                except Exception as e2:
+                    logging.warning(f"[{self.exchange}] HMM prediction still failed after fix: {e2}")
+            
+            # Fallback to last known regime or default
+            if self.last_regime is not None:
+                logging.warning(f"[{self.exchange}] Using last known regime {self.last_regime} as fallback")
+                return self.last_regime
+            
+            # Default to regime 0 if no history
+            logging.warning(f"[{self.exchange}] No regime history, defaulting to regime 0")
+            return 0
+        except Exception as e:
+            logging.error(f"[{self.exchange}] Unexpected error in HMM prediction: {e}", exc_info=True)
+            return self.last_regime if self.last_regime is not None else 0
+
     def generate_signal(self, features_dict: Dict[str, Any]) -> Tuple[str, float, str, Dict]:
         """Generate a signal with enriched metadata and risk sizing."""
         if not self.models_loaded:
@@ -247,12 +313,15 @@ class MLSignalGenerator:
             if len(self.regime_feature_buffer) >= 2:
                 # Use the sequence for prediction (last state in sequence is the current regime)
                 buffer_array = np.array(list(self.regime_feature_buffer))
-                predicted_states = self.hmm_model.predict(buffer_array)
-                current_regime = int(predicted_states[-1])  # Use the last predicted state
+                current_regime = self._predict_regime_safe(buffer_array)
             else:
                 # Fallback to single-row prediction if buffer not yet filled
                 # (This can happen on first few predictions)
-                current_regime = int(self.hmm_model.predict(hmm_input)[0])
+                hmm_input_array = hmm_input.values
+                current_regime = self._predict_regime_safe(hmm_input_array)
+            
+            if current_regime is None:
+                return 'HOLD', 0.0, 'HMM regime prediction failed.', {}
 
             regime_model = self.regime_models.get(current_regime)
             if regime_model is None:
