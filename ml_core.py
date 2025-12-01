@@ -330,7 +330,19 @@ class MLSignalGenerator:
             transformed_vector = self._transform_features(feature_frame.values)
             probabilities = regime_model.predict_proba(transformed_vector)[0]
             class_mapping = regime_model.classes_
-            predicted_class = class_mapping[int(np.argmax(probabilities))]
+            predicted_class_encoded = class_mapping[int(np.argmax(probabilities))]
+            
+            # Map from encoded labels [0, 1, 2] back to original labels [-1, 0, 1]
+            # 0 -> -1 (SELL), 1 -> 0 (HOLD), 2 -> 1 (BUY)
+            if predicted_class_encoded == 0:
+                predicted_class = -1
+            elif predicted_class_encoded == 1:
+                predicted_class = 0
+            elif predicted_class_encoded == 2:
+                predicted_class = 1
+            else:
+                predicted_class = predicted_class_encoded  # Fallback for unexpected values
+            
             confidence = float(np.max(probabilities))
             signal = SIGNAL_MAP.get(predicted_class, 'HOLD')
 
@@ -350,10 +362,19 @@ class MLSignalGenerator:
                     current_volatility=current_vol,
                 )
 
+            # Extract probabilities: class_mapping is [0, 1, 2] which maps to [-1, 0, 1]
+            # 0 -> -1 (SELL), 1 -> 0 (HOLD), 2 -> 1 (BUY)
+            buy_prob = 0.0
+            sell_prob = 0.0
+            if 2 in class_mapping:  # BUY (encoded as 2)
+                buy_prob = float(probabilities[list(class_mapping).index(2)])
+            if 0 in class_mapping:  # SELL (encoded as 0)
+                sell_prob = float(probabilities[list(class_mapping).index(0)])
+            
             metadata = {
                 'regime': current_regime,
-                'buy_prob': float(probabilities[list(class_mapping).index(1)]) if 1 in class_mapping else 0.0,
-                'sell_prob': float(probabilities[list(class_mapping).index(-1)]) if -1 in class_mapping else 0.0,
+                'buy_prob': buy_prob,
+                'sell_prob': sell_prob,
                 'position_size_frac': risk_payload.get('fraction', 0.0),
                 'kelly_fraction': risk_payload.get('kelly_fraction', 0.0),
                 'recommended_lots': risk_payload.get('recommended_lots', 0),

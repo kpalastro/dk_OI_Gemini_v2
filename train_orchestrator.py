@@ -309,7 +309,15 @@ def _prepare_xy(frame: pd.DataFrame, features: Sequence[str]) -> Tuple[np.ndarra
     feature_cols = [col for col in features if col in frame.columns]
     X = frame[feature_cols].values.astype(np.float32)
     y = frame['target'].values.astype(int)
-    return X, y
+    
+    # Map target labels from [-1, 0, 1] to [0, 1, 2] for XGBoost compatibility
+    # -1 (SELL) -> 0, 0 (HOLD) -> 1, 1 (BUY) -> 2
+    y_encoded = y.copy()
+    y_encoded[y == -1] = 0
+    y_encoded[y == 0] = 1
+    y_encoded[y == 1] = 2
+    
+    return X, y_encoded
 
 
 def _run_optuna(
