@@ -121,17 +121,37 @@ def import_table(conn, table_name, df, config):
         
         # Map CSV column names to database column names
         csv_to_db = {}
+        used_db_columns = set()  # Track which DB columns we've already mapped
+        
         for csv_col in df.columns:
             if csv_col in db_columns:
-                csv_to_db[csv_col] = csv_col
+                # CSV column directly matches DB column
+                if csv_col not in used_db_columns:
+                    csv_to_db[csv_col] = csv_col
+                    used_db_columns.add(csv_col)
             elif csv_col in column_mappings:
+                # CSV column needs mapping
                 db_col = column_mappings[csv_col]
-                if db_col in db_columns:
-                    csv_to_db[csv_col] = db_col
-                    print(f"   ℹ Mapping CSV column '{csv_col}' to database column '{db_col}'")
+                if db_col in db_columns and db_col not in used_db_columns:
+                    # Only map if target DB column doesn't already exist in CSV
+                    if db_col not in df.columns:
+                        csv_to_db[csv_col] = db_col
+                        used_db_columns.add(db_col)
+                        print(f"   ℹ Mapping CSV column '{csv_col}' to database column '{db_col}'")
+                    else:
+                        # Target column already exists in CSV, skip mapping
+                        print(f"   ℹ Skipping mapping of '{csv_col}' - '{db_col}' already exists in CSV")
         
         # Filter to only columns that exist in database (or can be mapped)
-        valid_columns = [csv_to_db[csv_col] for csv_col in df.columns if csv_col in csv_to_db]
+        # Use set to deduplicate, then convert back to list to preserve order
+        valid_columns = []
+        seen = set()
+        for csv_col in df.columns:
+            if csv_col in csv_to_db:
+                db_col = csv_to_db[csv_col]
+                if db_col not in seen:
+                    valid_columns.append(db_col)
+                    seen.add(db_col)
         
         # Exclude id for auto-increment tables
         exclude_id = table_name in [
