@@ -63,11 +63,29 @@ def _resolve_macro_exchange(exchange: str) -> str:
     return exchange.upper()
 
 
+def _get_market_times_ist(target_date: date) -> Tuple[datetime, datetime]:
+    """
+    Get market open (09:15 AM) and close (15:30 PM) times in IST for a given date.
+    
+    Args:
+        target_date: The date for which to get market times
+    
+    Returns:
+        Tuple of (market_open, market_close) both timezone-aware in IST
+    """
+    from datetime import time as time_class
+    # Create market open time: 09:15:00 IST
+    market_open = to_ist(datetime.combine(target_date, time_class(hour=9, minute=15, second=0, microsecond=0)))
+    # Create market close time: 15:30:00 IST
+    market_close = to_ist(datetime.combine(target_date, time_class(hour=15, minute=30, second=0, microsecond=0)))
+    return market_open, market_close
+
+
 def _is_market_open(now: Optional[datetime] = None) -> bool:
     """
     Return True only during regular Indian equity market hours in IST:
     - Monday–Friday
-    - Between 09:15 and 15:30 (inclusive)
+    - Between 09:15 AM and 3:30 PM IST (inclusive)
 
     Used to prevent saving intraday data when the market is closed.
     """
@@ -84,8 +102,9 @@ def _is_market_open(now: Optional[datetime] = None) -> bool:
     if now.weekday() >= 5:  # Saturday or Sunday
         return False
 
-    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    # Get market times for today explicitly in IST
+    today = now.date()
+    market_open, market_close = _get_market_times_ist(today)
 
     return market_open <= now <= market_close
 
@@ -1439,19 +1458,19 @@ def _previous_weekday(start_date: date) -> date:
             return candidate
 
 def get_last_trading_session_times() -> Tuple[datetime, datetime]:
-    """Determine the start and end datetime for the most recent trading session."""
+    """
+    Determine the start and end datetime for the most recent trading session.
+    All times are explicitly in IST (Indian Standard Time).
+    """
     now = now_ist()  # This returns timezone-aware datetime in IST
     today = now.date()
     
-    # Create market open/close times as timezone-aware in IST
-    market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    # Get today's market times explicitly in IST
+    market_open_time, market_close_time = _get_market_times_ist(today)
 
     if today.weekday() >= 5:  # Weekend
         session_day = _previous_weekday(today)
-        # Create timezone-aware datetime by combining date with time and adding IST
-        from_dt = to_ist(datetime.combine(session_day, market_open_time.time()))
-        to_dt = to_ist(datetime.combine(session_day, market_close_time.time()))
+        from_dt, to_dt = _get_market_times_ist(session_day)
         # Ensure dates are not in the future
         if to_dt > now:
             to_dt = now
@@ -1467,8 +1486,7 @@ def get_last_trading_session_times() -> Tuple[datetime, datetime]:
     
     # Before market open - use previous trading day
     session_day = _previous_weekday(today)
-    from_dt = to_ist(datetime.combine(session_day, market_open_time.time()))
-    to_dt = to_ist(datetime.combine(session_day, market_close_time.time()))
+    from_dt, to_dt = _get_market_times_ist(session_day)
     # Ensure dates are not in the future
     if to_dt > now:
         to_dt = now
@@ -1479,9 +1497,11 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
     Calculate proper from_date and to_date for fetching historical data.
     Handles market open scenarios, weekends, and ensures we get enough candles.
     
-    When at market open (09:15am), fetches last 'minutes' minutes from previous trading day.
+    When at market open (09:15am IST), fetches last 'minutes' minutes from previous trading day.
     Handles weekends by going back to last weekday (Friday if Saturday/Sunday).
     Handles Monday morning by going back to Friday.
+    
+    All times are explicitly in IST (Indian Standard Time).
     
     Args:
         minutes: Number of minutes of historical data needed (default: 40)
@@ -1490,36 +1510,35 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
         Tuple of (from_dt, to_dt) for historical data fetch (both timezone-aware in IST)
     """
     now = now_ist()  # Timezone-aware in IST
-    market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
     today = now.date()
+    
+    # Get today's market times explicitly in IST
+    market_open_time, market_close_time = _get_market_times_ist(today)
     
     # Handle weekends - get data from last trading day (Friday)
     if today.weekday() >= 5:  # Saturday (5) or Sunday (6)
         last_trading_day = _previous_weekday(today)
-        last_day_close = to_ist(datetime.combine(last_trading_day, market_close_time.time()))
+        last_day_open, last_day_close = _get_market_times_ist(last_trading_day)
         # Get last 'minutes' minutes from the previous trading day
         from_dt = last_day_close - timedelta(minutes=minutes)
         # Ensure we don't go before market open on that day
-        last_day_open = to_ist(datetime.combine(last_trading_day, market_open_time.time()))
         if from_dt < last_day_open:
             from_dt = last_day_open
         to_dt = last_day_close
-        logging.debug(f"Weekend detected: fetching from previous trading day {last_trading_day}")
+        logging.debug(f"Weekend detected: fetching from previous trading day {last_trading_day} (IST: {from_dt} to {to_dt})")
         return from_dt, to_dt
     
     # If we're before market open today, get data from previous trading day
     if now < market_open_time:
         last_trading_day = _previous_weekday(today)
-        last_day_close = to_ist(datetime.combine(last_trading_day, market_close_time.time()))
+        last_day_open, last_day_close = _get_market_times_ist(last_trading_day)
         # Get last 'minutes' minutes from the previous trading day
         from_dt = last_day_close - timedelta(minutes=minutes)
         # Ensure we don't go before market open on that day
-        last_day_open = to_ist(datetime.combine(last_trading_day, market_open_time.time()))
         if from_dt < last_day_open:
             from_dt = last_day_open
         to_dt = last_day_close
-        logging.debug(f"Before market open: fetching from previous trading day {last_trading_day}")
+        logging.debug(f"Before market open: fetching from previous trading day {last_trading_day} (IST: {from_dt} to {to_dt})")
         return from_dt, to_dt
     
     # If we're at or just after market open (within first 'minutes' minutes)
@@ -1528,15 +1547,14 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
     if minutes_elapsed < minutes:
         # We don't have enough minutes from today yet, get from previous day
         last_trading_day = _previous_weekday(today)
-        last_day_close = to_ist(datetime.combine(last_trading_day, market_close_time.time()))
+        last_day_open, last_day_close = _get_market_times_ist(last_trading_day)
         # Get last 'minutes' minutes from the previous trading day
         from_dt = last_day_close - timedelta(minutes=minutes)
         # Ensure we don't go before market open on that day
-        last_day_open = to_ist(datetime.combine(last_trading_day, market_open_time.time()))
         if from_dt < last_day_open:
             from_dt = last_day_open
         to_dt = last_day_close
-        logging.debug(f"At market open ({minutes_elapsed} min elapsed): fetching from previous trading day {last_trading_day}")
+        logging.debug(f"At market open ({minutes_elapsed} min elapsed): fetching from previous trading day {last_trading_day} (IST: {from_dt} to {to_dt})")
         return from_dt, to_dt
     
     # After market close - clamp to today's session
@@ -1545,7 +1563,7 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
         if from_dt < market_open_time:
             from_dt = market_open_time
         to_dt = market_close_time
-        logging.debug(f"Post-market close: fetching {from_dt} to {to_dt}")
+        logging.debug(f"Post-market close: fetching IST {from_dt} to {to_dt}")
         return from_dt, to_dt
 
     # Normal intra-day case
@@ -1553,7 +1571,7 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
     if from_dt < market_open_time:
         from_dt = market_open_time
     to_dt = now
-    logging.debug(f"Normal trading hours: fetching from {from_dt} to {to_dt}")
+    logging.debug(f"Normal trading hours: fetching from IST {from_dt} to {to_dt}")
     return from_dt, to_dt
 
 # ==============================================================================
