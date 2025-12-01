@@ -22,7 +22,7 @@ from sklearn.metrics import classification_report, f1_score
 import database_new as db
 from feature_engineering import FeatureEngineeringError, REQUIRED_FEATURE_COLUMNS, prepare_training_features
 from train_model import RegimeHMMTransformer, define_triple_barrier_target
-from time_utils import today_ist
+from time_utils import today_ist, now_ist
 
 try:  # Optional dependencies with graceful degradation
     import optuna  # type: ignore
