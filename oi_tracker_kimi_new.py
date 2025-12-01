@@ -1440,36 +1440,35 @@ def _previous_weekday(start_date: date) -> date:
 
 def get_last_trading_session_times() -> Tuple[datetime, datetime]:
     """Determine the start and end datetime for the most recent trading session."""
-    now = now_ist()
-    # Make sure now is naive datetime for comparison
-    if now.tzinfo is not None:
-        now = now.replace(tzinfo=None)
-    
-    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    now = now_ist()  # This returns timezone-aware datetime in IST
     today = now.date()
+    
+    # Create market open/close times as timezone-aware in IST
+    market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
 
     if today.weekday() >= 5:  # Weekend
         session_day = _previous_weekday(today)
-        from_dt = datetime.combine(session_day, market_open.time())
-        to_dt = datetime.combine(session_day, market_close.time())
+        # Create timezone-aware datetime by combining date with time and adding IST
+        from_dt = to_ist(datetime.combine(session_day, market_open_time.time()))
+        to_dt = to_ist(datetime.combine(session_day, market_close_time.time()))
         # Ensure dates are not in the future
         if to_dt > now:
             to_dt = now
         return from_dt, to_dt
     
-    if market_open <= now <= market_close:
+    if market_open_time <= now <= market_close_time:
         # During market hours - use current time as end
-        return market_open, now
+        return market_open_time, now
     
-    if now > market_close:
+    if now > market_close_time:
         # After market close - use today's session
-        return market_open, market_close
+        return market_open_time, market_close_time
     
     # Before market open - use previous trading day
     session_day = _previous_weekday(today)
-    from_dt = datetime.combine(session_day, market_open.time())
-    to_dt = datetime.combine(session_day, market_close.time())
+    from_dt = to_ist(datetime.combine(session_day, market_open_time.time()))
+    to_dt = to_ist(datetime.combine(session_day, market_close_time.time()))
     # Ensure dates are not in the future
     if to_dt > now:
         to_dt = now
@@ -1488,9 +1487,9 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
         minutes: Number of minutes of historical data needed (default: 40)
     
     Returns:
-        Tuple of (from_dt, to_dt) for historical data fetch
+        Tuple of (from_dt, to_dt) for historical data fetch (both timezone-aware in IST)
     """
-    now = now_ist()
+    now = now_ist()  # Timezone-aware in IST
     market_open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
     market_close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
     today = now.date()
@@ -1498,11 +1497,11 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
     # Handle weekends - get data from last trading day (Friday)
     if today.weekday() >= 5:  # Saturday (5) or Sunday (6)
         last_trading_day = _previous_weekday(today)
-        last_day_close = datetime.combine(last_trading_day, market_close_time.time())
+        last_day_close = to_ist(datetime.combine(last_trading_day, market_close_time.time()))
         # Get last 'minutes' minutes from the previous trading day
         from_dt = last_day_close - timedelta(minutes=minutes)
         # Ensure we don't go before market open on that day
-        last_day_open = datetime.combine(last_trading_day, market_open_time.time())
+        last_day_open = to_ist(datetime.combine(last_trading_day, market_open_time.time()))
         if from_dt < last_day_open:
             from_dt = last_day_open
         to_dt = last_day_close
@@ -1512,11 +1511,11 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
     # If we're before market open today, get data from previous trading day
     if now < market_open_time:
         last_trading_day = _previous_weekday(today)
-        last_day_close = datetime.combine(last_trading_day, market_close_time.time())
+        last_day_close = to_ist(datetime.combine(last_trading_day, market_close_time.time()))
         # Get last 'minutes' minutes from the previous trading day
         from_dt = last_day_close - timedelta(minutes=minutes)
         # Ensure we don't go before market open on that day
-        last_day_open = datetime.combine(last_trading_day, market_open_time.time())
+        last_day_open = to_ist(datetime.combine(last_trading_day, market_open_time.time()))
         if from_dt < last_day_open:
             from_dt = last_day_open
         to_dt = last_day_close
@@ -1529,11 +1528,11 @@ def get_historical_data_time_range(minutes: int = HISTORICAL_DATA_MINUTES) -> Tu
     if minutes_elapsed < minutes:
         # We don't have enough minutes from today yet, get from previous day
         last_trading_day = _previous_weekday(today)
-        last_day_close = datetime.combine(last_trading_day, market_close_time.time())
+        last_day_close = to_ist(datetime.combine(last_trading_day, market_close_time.time()))
         # Get last 'minutes' minutes from the previous trading day
         from_dt = last_day_close - timedelta(minutes=minutes)
         # Ensure we don't go before market open on that day
-        last_day_open = datetime.combine(last_trading_day, market_open_time.time())
+        last_day_open = to_ist(datetime.combine(last_trading_day, market_open_time.time()))
         if from_dt < last_day_open:
             from_dt = last_day_open
         to_dt = last_day_close
