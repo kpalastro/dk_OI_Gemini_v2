@@ -72,6 +72,31 @@ def clean_dataframe(df, table_name):
     
     return df
 
+def get_table_columns(conn, table_name, config):
+    """Get actual column names from the database table."""
+    cursor = conn.cursor()
+    is_postgres = config.db_type == 'postgres'
+    
+    try:
+        if is_postgres:
+            query = """
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = %s
+                ORDER BY ordinal_position
+            """
+            cursor.execute(query, (table_name,))
+            columns = [row[0] for row in cursor.fetchall()]
+        else:
+            # SQLite
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = [row[1] for row in cursor.fetchall()]
+        
+        return set(columns)
+    except Exception as e:
+        logging.warning(f"Could not fetch columns for {table_name}: {e}")
+        return None
+
 def import_table(conn, table_name, df, config):
     """Import a dataframe into a database table."""
     if df.empty:
@@ -83,26 +108,61 @@ def import_table(conn, table_name, df, config):
     is_postgres = config.db_type == 'postgres'
     
     try:
-        # Get column names from dataframe, excluding id for auto-increment tables
-        # For tables with auto-increment id, we exclude it and let DB generate it
+        # Get actual database columns
+        db_columns = get_table_columns(conn, table_name, config)
+        if db_columns is None:
+            print(f"   ⚠ Could not fetch database schema for {table_name}, using CSV columns")
+            db_columns = set(df.columns)
+        
+        # Column name mappings for backward compatibility
+        column_mappings = {
+            'sentiment_score': 'news_sentiment_score',  # Old CSV might have this
+        }
+        
+        # Map CSV column names to database column names
+        csv_to_db = {}
+        for csv_col in df.columns:
+            if csv_col in db_columns:
+                csv_to_db[csv_col] = csv_col
+            elif csv_col in column_mappings:
+                db_col = column_mappings[csv_col]
+                if db_col in db_columns:
+                    csv_to_db[csv_col] = db_col
+                    print(f"   ℹ Mapping CSV column '{csv_col}' to database column '{db_col}'")
+        
+        # Filter to only columns that exist in database (or can be mapped)
+        valid_columns = [csv_to_db[csv_col] for csv_col in df.columns if csv_col in csv_to_db]
+        
+        # Exclude id for auto-increment tables
         exclude_id = table_name in [
             "option_chain_snapshots", "training_batches", "vix_term_structure",
             "macro_signals", "order_book_depth_snapshots"
         ]
         
-        if exclude_id and 'id' in df.columns:
-            columns = [col for col in df.columns if col != 'id']
-        else:
-            columns = list(df.columns)
+        if exclude_id and 'id' in valid_columns:
+            valid_columns = [col for col in valid_columns if col != 'id']
         
-        if not columns:
-            print(f"   ⚠ Skipping {table_name}: No columns found")
+        # Warn about columns that will be skipped
+        skipped_columns = [col for col in df.columns if col not in csv_to_db and col != 'id']
+        if skipped_columns:
+            print(f"   ⚠ Skipping columns not in database: {', '.join(skipped_columns)}")
+        
+        if not valid_columns:
+            print(f"   ⚠ Skipping {table_name}: No valid columns found")
             return 0
         
-        # Prepare data rows
+        # Create reverse mapping (db_col -> csv_col) for data extraction
+        db_to_csv = {db_col: csv_col for csv_col, db_col in csv_to_db.items()}
+        
+        # Determine final columns to use (may exclude id for SQLite auto-increment)
+        final_columns = valid_columns.copy()
+        if not is_postgres and exclude_id and 'id' in final_columns:
+            final_columns = [col for col in final_columns if col != 'id']
+        
+        # Prepare data rows using database column names
         rows = []
         for _, row in df.iterrows():
-            row_data = tuple(row[col] for col in columns)
+            row_data = tuple(row[db_to_csv[db_col]] if db_col in db_to_csv else None for db_col in final_columns)
             rows.append(row_data)
         
         if not rows:
@@ -110,7 +170,7 @@ def import_table(conn, table_name, df, config):
             return 0
         
         # Build INSERT statement with conflict resolution
-        placeholders = ', '.join([ph] * len(columns))
+        placeholders = ', '.join([ph] * len(final_columns))
         
         if is_postgres:
             # PostgreSQL: Use ON CONFLICT DO UPDATE
@@ -122,17 +182,17 @@ def import_table(conn, table_name, df, config):
             elif table_name == "option_chain_snapshots":
                 conflict_cols = "(timestamp, exchange, strike, option_type)"
             else:
-                # For other tables, if id exists in CSV, use it for conflict
+                # For other tables, if id exists in final columns, use it for conflict
                 # Otherwise, no conflict resolution (will create duplicates)
-                if 'id' in df.columns and not exclude_id:
+                if 'id' in final_columns and not exclude_id:
                     conflict_cols = "(id)"
                 else:
                     conflict_cols = None
             
             if conflict_cols:
-                update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in columns])
+                update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in final_columns])
                 query = f"""
-                    INSERT INTO {table_name} ({', '.join(columns)})
+                    INSERT INTO {table_name} ({', '.join(final_columns)})
                     VALUES ({placeholders})
                     ON CONFLICT {conflict_cols}
                     DO UPDATE SET {update_clause}
@@ -140,24 +200,15 @@ def import_table(conn, table_name, df, config):
             else:
                 # No conflict resolution - just insert (may create duplicates)
                 query = f"""
-                    INSERT INTO {table_name} ({', '.join(columns)})
+                    INSERT INTO {table_name} ({', '.join(final_columns)})
                     VALUES ({placeholders})
                 """
         else:
             # SQLite: Use INSERT OR REPLACE
-            # For SQLite, we need to handle id column differently
-            if exclude_id and 'id' in df.columns:
-                # For auto-increment tables, exclude id and let SQLite generate it
-                query = f"""
-                    INSERT OR REPLACE INTO {table_name} ({', '.join(columns)})
-                    VALUES ({placeholders})
-                """
-            else:
-                # Include all columns including id if present
-                query = f"""
-                    INSERT OR REPLACE INTO {table_name} ({', '.join(columns)})
-                    VALUES ({placeholders})
-                """
+            query = f"""
+                INSERT OR REPLACE INTO {table_name} ({', '.join(final_columns)})
+                VALUES ({placeholders})
+            """
         
         # Execute batch insert
         cursor.executemany(query, rows)
