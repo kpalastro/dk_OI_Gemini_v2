@@ -4801,7 +4801,7 @@ if __name__ == '__main__':
         logging.info(f"🌐 Web interface: http://{host}:{port}")
         logging.info("=" * 70)
         
-        socketio.run(app, host=host, port=port, debug=False, use_reloader=False)
+        socketio.run(app, host=host, port=port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
         
     except (KeyboardInterrupt, SystemExit):
         logging.info("\n\n✓ Server stopped by user")

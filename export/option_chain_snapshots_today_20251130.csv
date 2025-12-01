@@ -1,1 +1,0 @@
-id,timestamp,exchange,strike,option_type,symbol,oi,ltp,token,underlying_price,moneyness,time_to_expiry_seconds,pct_change_3m,pct_change_5m,pct_change_10m,pct_change_15m,pct_change_30m,iv,volume,best_bid,best_ask,bid_quantity,ask_quantity,spread,order_book_imbalance,created_at,updated_at
