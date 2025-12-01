@@ -1,0 +1,48 @@
+# Environment variables (contains sensitive credentials)
+.env
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Log files
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+logs/
+env/
+.venv/
+models/
+exports/
+reports/
+trade_logs/
+trade_logs_old/
+trade_logs_old_old/
+trade_logs_old_old_old/
+trade_logs_old_old_old_old/
+trade_logs_old_old_old_old_old/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
