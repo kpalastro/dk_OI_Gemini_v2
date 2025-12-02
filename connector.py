@@ -249,6 +249,10 @@ class Connector:
         logging.info("=" * 70)
         
         try:
+            # Log connection attempt details
+            logging.info(f"Connecting with user_id: {self.kite.user_id}")
+            logging.info(f"Enctoken length: {len(self.kite.enctoken) if self.kite.enctoken else 0}")
+            
             self.kws = KiteTicker(
                 api_key="TradeViaPython",
                 access_token=self.kite.enctoken + "&user_id=" + self.kite.user_id
@@ -259,21 +263,43 @@ class Connector:
             self.kws.on_error = self._on_error
             self.kws.on_close = self._on_close
             
+            logging.info("Calling kws.connect(threaded=True)...")
             self.kws.connect(threaded=True)
+            logging.info("kws.connect() called, waiting for connection...")
             
             start_time = time.time()
             attempt = 0
+            last_log_time = start_time
+            
             while time.time() - start_time < timeout_seconds:
-                if self.kws.is_connected():
-                    logging.info("✓ WebSocket connected successfully")
-                    self._reconnect_attempts = 0
-                    return True
+                elapsed = time.time() - start_time
+                
+                # Log progress every 5 seconds
+                if elapsed - (last_log_time - start_time) >= 5:
+                    logging.info(f"Waiting for WebSocket connection... ({elapsed:.1f}s / {timeout_seconds}s)")
+                    last_log_time = time.time()
+                
+                # Check connection status
+                try:
+                    if self.kws and self.kws.is_connected():
+                        logging.info(f"✓ WebSocket connected successfully after {elapsed:.1f} seconds")
+                        self._reconnect_attempts = 0
+                        return True
+                except Exception as check_error:
+                    logging.debug(f"Error checking connection status: {check_error}")
                 
                 wait_time = min(0.5 + (attempt * 0.5), 2.0)
                 time.sleep(wait_time)
                 attempt += 1
             
-            logging.error(f"✗ WebSocket failed to connect within {timeout_seconds} seconds")
+            elapsed = time.time() - start_time
+            logging.error(f"✗ WebSocket failed to connect within {timeout_seconds} seconds (waited {elapsed:.1f}s)")
+            logging.error(f"Connection state: kws exists={self.kws is not None}")
+            if self.kws:
+                try:
+                    logging.error(f"is_connected()={self.kws.is_connected()}")
+                except Exception as e:
+                    logging.error(f"Error checking is_connected(): {e}")
             return False
             
         except Exception as e:

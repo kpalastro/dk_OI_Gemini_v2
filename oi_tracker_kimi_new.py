@@ -339,12 +339,22 @@ system_health_thread = None
 exchange_update_threads: Dict[str, Thread] = {}
 
 
-def _auth_guard(json_response: bool = False):
-    """Return appropriate response if user is not authenticated or system not ready."""
+def _auth_guard(json_response: bool = False, allow_uninitialized: bool = False):
+    """Return appropriate response if user is not authenticated or system not ready.
+    
+    Args:
+        json_response: If True, return JSON error response
+        allow_uninitialized: If True, allow access even if system is not initialized
+                            (useful for status endpoints)
+    """
     if not session.get('authenticated'):
         if json_response:
             return jsonify({'error': UI_STRINGS.get('login_error_unauthorized', 'Unauthorized')}), 401
         return redirect(url_for('login'))
+    
+    # If allow_uninitialized is True, skip the initialization check
+    if allow_uninitialized:
+        return None
     
     # Allow access if system is initializing (for async initialization flow)
     # The frontend will show loading state while initializing
@@ -358,12 +368,18 @@ def _auth_guard(json_response: bool = False):
     return None
 
 
-def login_required(json_response: bool = False):
-    """Decorator to guard routes that require authentication."""
+def login_required(json_response: bool = False, allow_uninitialized: bool = False):
+    """Decorator to guard routes that require authentication.
+    
+    Args:
+        json_response: If True, return JSON error response
+        allow_uninitialized: If True, allow access even if system is not initialized
+                            (useful for status endpoints)
+    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            guard_response = _auth_guard(json_response=json_response)
+            guard_response = _auth_guard(json_response=json_response, allow_uninitialized=allow_uninitialized)
             if guard_response is not None:
                 return guard_response
             return func(*args, **kwargs)
@@ -3443,9 +3459,15 @@ def index():
                              is_initialized=is_initialized)
 
 @app.route('/api/system-status')
-@login_required(json_response=True)
+@login_required(json_response=True, allow_uninitialized=True)
 def get_system_status():
-    """Get system initialization status for frontend polling."""
+    """Get system initialization status for frontend polling.
+    
+    This endpoint is special - it doesn't require the system to be initialized
+    because it's used to check the initialization status itself.
+    """
+    # Allow access even if system is not initialized/initializing
+    # This endpoint is just for status checking, not for accessing protected data
     return jsonify({
         'initialized': system_state.get('initialized', False),
         'initializing': system_state.get('initializing', False)
@@ -4680,8 +4702,16 @@ def initialize_system(user_id: Optional[str] = None,
         
         # Set tick handler and connect WebSocket via connector
         connector.on_tick_callback = handle_ticks
-        if not connector.connect_websocket(timeout_seconds=config.websocket_connect_timeout_seconds):
-            raise ConnectionError("WebSocket failed to connect")
+        
+        # Try to connect WebSocket, but don't fail initialization if it times out
+        # The connector will retry automatically in the background
+        websocket_connected = connector.connect_websocket(timeout_seconds=config.websocket_connect_timeout_seconds)
+        if not websocket_connected:
+            logging.warning("⚠ WebSocket connection timed out during initialization")
+            logging.warning("⚠ System will continue without WebSocket - automatic retry will continue in background")
+            logging.warning("⚠ Real-time data updates will be delayed until WebSocket connects")
+            # Don't raise error - let the system start and WebSocket will retry automatically
+            # The connector has built-in retry logic that will keep trying to connect
         
         # Store references for backward compatibility
         app_manager.kws = connector.kws
