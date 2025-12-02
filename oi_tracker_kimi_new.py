@@ -3244,6 +3244,67 @@ def run_data_update_loop_exchange(exchange: str):
                 time_yrs
             )
             
+            # CRITICAL FIX: Emit option chain data directly from update loop
+            # This ensures UI refreshes even if ML processing is slow or queue is full
+            if exchange in DISPLAY_EXCHANGES:
+                try:
+                    # Calculate simple PCR from option chain data
+                    total_ce_oi = sum(c.get('latest_oi', 0) or 0 for c in calls)
+                    total_pe_oi = sum(p.get('latest_oi', 0) or 0 for p in puts)
+                    pcr = total_pe_oi / max(total_ce_oi, 1.0) if total_ce_oi > 0 else 0.0
+                    
+                    with handler.lock:
+                        # Update latest_oi_data with fresh option chain data
+                        handler.latest_oi_data['call_options'] = calls
+                        handler.latest_oi_data['put_options'] = puts
+                        handler.latest_oi_data['atm_strike'] = int(atm) if atm else None
+                        handler.latest_oi_data['underlying_price'] = round(spot_ltp, 2) if spot_ltp else None
+                        handler.latest_oi_data['last_update'] = now.strftime('%H:%M:%S')
+                        handler.latest_oi_data['status'] = 'Live'
+                        handler.latest_oi_data['pcr'] = pcr
+                        
+                        # Include VIX if available
+                        vix_value = app_manager.latest_vix_data.get('value')
+                        if vix_value is not None:
+                            handler.latest_oi_data['vix'] = vix_value
+                        
+                        # Include futures data if available
+                        if fut_oi is not None:
+                            handler.latest_oi_data['underlying_future_oi'] = fut_oi
+                        if handler.latest_future_price is not None:
+                            handler.latest_oi_data['underlying_future_price'] = handler.latest_future_price
+                        if handler.futures_symbol:
+                            handler.latest_oi_data['underlying_future_symbol'] = handler.futures_symbol
+                        
+                        # Include futures OI change if cached
+                        if handler.cached_fut_oi_change_3m is not None:
+                            handler.latest_oi_data['percent_oichange_fut_3m'] = handler.cached_fut_oi_change_3m
+                        
+                        # Include position data
+                        handler.latest_oi_data['open_positions'] = list(handler.open_positions.values())
+                        handler.latest_oi_data['total_mtm'] = handler.total_mtm
+                        handler.latest_oi_data['closed_pnl'] = handler.closed_positions_pnl
+                        
+                        # Preserve ML data if available (will be updated by feature worker when ready)
+                        # Don't overwrite ML data if it exists, just ensure option chain is fresh
+                        if 'ml_signal' not in handler.latest_oi_data:
+                            handler.latest_oi_data['ml_signal'] = handler.ml_signal
+                        if 'ml_confidence' not in handler.latest_oi_data:
+                            handler.latest_oi_data['ml_confidence'] = handler.ml_confidence
+                        if 'ml_rationale' not in handler.latest_oi_data:
+                            handler.latest_oi_data['ml_rationale'] = handler.ml_rationale
+                        if 'ml_metadata' not in handler.latest_oi_data:
+                            handler.latest_oi_data['ml_metadata'] = handler.ml_metadata
+                        
+                        # Create sanitized copy for emission
+                        emit_data = make_json_serializable(handler.latest_oi_data.copy())
+                    
+                    # Emit the data update directly
+                    socketio.emit(f'data_update_{exchange}', emit_data)
+                    logging.debug(f"[{exchange}] Emitted option chain update: {len(calls)} calls, {len(puts)} puts, PCR={pcr:.2f}")
+                except Exception as e:
+                    logging.error(f"[{exchange}] Error emitting option chain update: {e}", exc_info=True)
+            
             work_payload = _build_feature_job_payload(
                 exchange,
                     handler,
