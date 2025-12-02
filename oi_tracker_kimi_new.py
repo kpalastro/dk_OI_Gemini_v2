@@ -586,7 +586,7 @@ class ReelPersistence:
 
     def load(self, handlers: Dict[str, ExchangeDataHandler]) -> None:
         if not self.filepath.exists():
-            logging.info("No reel snapshot found on disk (cold start)")
+            logging.info("No reel snapshot found on disk (cold start - will bootstrap from API)")
             return
         try:
             with self.lock, self.filepath.open('rb') as fh:
@@ -599,11 +599,16 @@ class ReelPersistence:
                     continue
                 with handler.lock:
                     handler.data_reels = defaultdict(handler._create_data_reel)
+                    total_records = 0
+                    tokens_with_data = 0
                     for token, records in data.get('data_reels', {}).items():
                         resolved_token = int(token) if isinstance(token, str) and token.isdigit() else token
                         reel = handler._create_data_reel()
                         reel.extend(records[-DATA_REEL_MAX_LENGTH:])
                         handler.data_reels[resolved_token] = reel
+                        if len(reel) > 0:
+                            tokens_with_data += 1
+                            total_records += len(reel)
                     handler.futures_oi_reels = deque(
                         data.get('futures_oi_reels', [])[-DATA_REEL_MAX_LENGTH:],
                         maxlen=DATA_REEL_MAX_LENGTH
@@ -612,13 +617,16 @@ class ReelPersistence:
                     handler.option_iv_cache.update(data.get('option_iv_cache', {}))
                     handler.pending_reel_points = defaultdict(dict, data.get('pending_reel_points', {}))
                     handler.last_saved_oi_state = data.get('last_saved_oi_state', {})
-                    if handler.data_reels:
+                    if handler.data_reels and tokens_with_data > 0:
                         handler.historical_bootstrap_completed = True
                         restored_exchanges.append(exchange)
+                        logging.info(f"[{exchange}] Restored {tokens_with_data} tokens with {total_records} total records from snapshot")
             if restored_exchanges:
-                logging.info(f"✓ Restored data reels for {', '.join(restored_exchanges)}")
+                logging.info(f"✓ Restored data reels for {', '.join(restored_exchanges)} from disk snapshot")
+            else:
+                logging.warning("Reel snapshot exists but no data was restored - will bootstrap from API")
         except Exception as e:
-            logging.error(f"Reel persistence load failed: {e}")
+            logging.error(f"Reel persistence load failed: {e} - will bootstrap from API")
 
 
 reel_persistence = ReelPersistence(Path('state/reels_snapshot.pkl'))
@@ -886,26 +894,48 @@ def _ensure_historical_bootstrap(handler: ExchangeDataHandler,
 
         throttle_state = {'last_request_ts': 0}
         success_count = 0
+        failed_tokens = []
 
+        logging.info(f"[{exchange}] Starting bootstrap for {len(tokens)} tokens")
+        
         for token in tokens:
+            token_success = False
             for attempt in range(3):
-                records = fetch_recent_minute_candles(
-                    app_manager.kite, token, exchange, DATA_REEL_MAX_LENGTH, throttle_state
-                )
-                if records:
-                    seed_data_reel_from_candles(handler, token, records)
-                    success_count += 1
-                    break
+                try:
+                    records = fetch_recent_minute_candles(
+                        app_manager.kite, token, exchange, DATA_REEL_MAX_LENGTH, throttle_state
+                    )
+                    if records:
+                        seed_data_reel_from_candles(handler, token, records)
+                        success_count += 1
+                        token_success = True
+                        logging.debug(f"[{exchange}] ✓ Bootstrapped token {token} with {len(records)} records")
+                        break
+                except Exception as e:
+                    logging.debug(f"[{exchange}] Bootstrap attempt {attempt+1} failed for token {token}: {e}")
                 time.sleep(1)
+            
+            if not token_success:
+                failed_tokens.append(token)
+                logging.warning(f"[{exchange}] Failed to bootstrap token {token} after 3 attempts")
 
+        # Log bootstrap summary
+        logging.info(f"[{exchange}] Bootstrap complete: {success_count}/{len(tokens)} tokens seeded")
+        if failed_tokens:
+            logging.warning(f"[{exchange}] Failed tokens: {len(failed_tokens)} (will populate from live data)")
+
+        # Mark as complete if we got at least 50% success OR if it's weekend
         if success_count >= len(tokens) * 0.5:
             handler.historical_bootstrap_completed = True
+            logging.info(f"[{exchange}] ✓ Historical bootstrap completed ({success_count}/{len(tokens)} tokens)")
         elif is_weekend:
             handler.historical_bootstrap_completed = True
             logging.warning(f"[{exchange}] Weekend mode: continuing without bootstrap")
         else:
-            logging.error(f"[{exchange}] Bootstrap failed, retrying...")
-            time.sleep(10)
+            # Even if we got some data, mark as complete to avoid infinite retry loop
+            # The system will continue to populate from live WebSocket data
+            handler.historical_bootstrap_completed = True
+            logging.warning(f"[{exchange}] Bootstrap partial success ({success_count}/{len(tokens)} tokens) - continuing with live data")
     except Exception as e:
         logging.error(f"[{exchange}] Bootstrap error: {e}")
         if is_weekend:
@@ -3317,7 +3347,13 @@ def run_data_update_loop_exchange(exchange: str):
                     
                     # Emit the data update directly
                     socketio.emit(f'data_update_{exchange}', emit_data)
-                    logging.debug(f"[{exchange}] Emitted option chain update: {len(calls)} calls, {len(puts)} puts, PCR={pcr:.2f}")
+                    # Log occasionally to avoid spam (every 10th emit)
+                    if not hasattr(run_data_update_loop_exchange, '_emit_count'):
+                        run_data_update_loop_exchange._emit_count = {}
+                    count = run_data_update_loop_exchange._emit_count.get(exchange, 0)
+                    run_data_update_loop_exchange._emit_count[exchange] = count + 1
+                    if count % 10 == 0:  # Log every 10th emit
+                        logging.info(f"[{exchange}] ✓ Direct option chain emit #{count+1}: {len(calls)} calls, {len(puts)} puts, PCR={pcr:.2f}, ATM={atm}")
                 except Exception as e:
                     logging.error(f"[{exchange}] Error emitting option chain update: {e}", exc_info=True)
             
