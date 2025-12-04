@@ -5,13 +5,15 @@ Enhanced with Phase 2 metrics monitoring.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict
 
 from flask import Blueprint, jsonify, render_template, request
 
 from strings import UI_STRINGS
-from metrics.phase2_metrics import get_metrics_collector
+
+LOGGER = logging.getLogger(__name__)
 
 monitoring_bp = Blueprint('monitoring', __name__)
 EXCHANGES = ['NSE', 'BSE']
@@ -26,6 +28,22 @@ def _load_json(path: Path) -> Dict:
         return json.loads(path.read_text(encoding='utf-8'))
     except json.JSONDecodeError:
         return {}
+
+
+def _safe_get_metrics_collector(exchange: str):
+    """
+    Lazy / safe import of Phase 2 metrics collector.
+
+    This avoids hard failure during app startup if the metrics package
+    is missing or shadowed in the Python environment (e.g. another
+    installed `metrics` package).
+    """
+    try:
+        from metrics.phase2_metrics import get_metrics_collector  # type: ignore
+    except ImportError as exc:
+        LOGGER.error("Phase 2 metrics module not available: %s", exc)
+        return None
+    return get_metrics_collector(exchange)
 
 
 def _load_health_payload() -> Dict[str, Dict]:
@@ -76,7 +94,10 @@ def phase2_metrics_api():
     if exchange not in EXCHANGES:
         return jsonify({'error': 'Invalid exchange'}), 400
     
-    collector = get_metrics_collector(exchange)
+    collector = _safe_get_metrics_collector(exchange)
+    if collector is None:
+        return jsonify({'error': 'Phase 2 metrics module not available on server'}), 503
+
     summary = collector.compute_summary(hours=hours)
     
     return jsonify(summary)
@@ -95,7 +116,10 @@ def phase2_metrics_detail_api(metric_type: str):
     if metric_type not in valid_types:
         return jsonify({'error': f'Invalid metric type. Must be one of: {valid_types}'}), 400
     
-    collector = get_metrics_collector(exchange)
+    collector = _safe_get_metrics_collector(exchange)
+    if collector is None:
+        return jsonify({'error': 'Phase 2 metrics module not available on server'}), 503
+
     metrics = collector.get_recent_metrics(metric_type, limit=limit)
     
     return jsonify({
