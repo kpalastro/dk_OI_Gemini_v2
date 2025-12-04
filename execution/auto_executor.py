@@ -359,6 +359,7 @@ class AutoExecutor:
         position_counter: int,
         current_open_positions: Optional[Dict[str, Dict]] = None,
         portfolio_state: Optional[Dict] = None,
+        lot_size: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         Execute a paper trade with Limit Order Chasing simulation.
@@ -409,6 +410,19 @@ class AutoExecutor:
             else:
                 fill_price = current_price - slippage
 
+        # Get lot size - use provided value or default based on exchange
+        if lot_size is None:
+            # Default lot sizes by exchange (fallback if not provided)
+            if self.exchange == 'NSE' or self.exchange == 'NSE_MONTHLY':
+                lot_size = 75  # NIFTY lot size
+            elif self.exchange == 'BSE':
+                lot_size = 20  # SENSEX lot size
+            elif 'BANKNIFTY' in self.exchange:
+                lot_size = 15  # BANKNIFTY lot size (typical value)
+            else:
+                lot_size = 50  # Generic fallback
+                LOGGER.warning(f"[{self.exchange}] Using default lot size 50 for {symbol}")
+        
         # Create position
         position_id = f"{self.exchange}_AUTO_{position_counter:04d}"
         side = 'B' if signal.signal == 'BUY' else 'S'
@@ -419,7 +433,7 @@ class AutoExecutor:
             'type': option_type,
             'side': side,
             'entry_price': fill_price,
-            'qty': result.quantity * 50,  # Convert lots to quantity (assuming 50 per lot)
+            'qty': result.quantity * lot_size,  # Convert lots to quantity using dynamic lot size
             'entry_time': now_ist().strftime('%Y-%m-%d %H:%M:%S'),
             'current_price': current_price,
             'mtm': 0.0,

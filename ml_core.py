@@ -19,10 +19,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
-from scipy.linalg import LinAlgError
 
 import database_new as db
 from risk_manager import get_optimal_position_size
+from time_utils import now_ist
 
 # Use Z-score of PCR for stationarity (fallback to raw PCR if Z-score not available)
 REGIME_FEATURES = ['vix', 'realized_vol_5m', 'pcr_total_oi_zscore', 'price_roc_30m', 'breadth_divergence']
@@ -36,6 +36,7 @@ class MLSignalGenerator:
         self.models_loaded = False
         self.regime_models: Optional[Dict[int, Any]] = None
         self.hmm_model: Optional[Any] = None
+        self.hmm_valid: bool = False  # Track if HMM model is valid for prediction
         self.feature_selector: Optional[Any] = None
         self.feature_names: List[str] = []
         self.training_report: Dict[str, Any] = {}
@@ -60,9 +61,6 @@ class MLSignalGenerator:
         # PCR history for Z-score calculation (approx 5 days of minute data)
         self.pcr_history: deque = deque(maxlen=750) 
         self._initialize_pcr_history()
-        
-        # Track last known regime for fallback
-        self.last_regime: Optional[int] = None
 
         self._load_models()
 
@@ -136,14 +134,48 @@ class MLSignalGenerator:
                         avg_accuracy = np.mean([fold.get('accuracy', 0.0) for fold in cv_results])
                         self.strategy_metrics['win_rate'] = max(avg_accuracy, 0.5)
 
+            # Validate HMM model by checking covariance matrices
+            if self.hmm_model is not None:
+                try:
+                    # Try to access covariance matrices to validate they're positive-definite
+                    if hasattr(self.hmm_model, 'covars_'):
+                        try:
+                            from scipy.linalg import cholesky
+                            # Test if we can compute Cholesky decomposition (validates positive-definiteness)
+                            for i, cov in enumerate(self.hmm_model.covars_):
+                                try:
+                                    cholesky(cov, lower=True)
+                                except (np.linalg.LinAlgError, ValueError):
+                                    logging.warning(
+                                        f"[{self.exchange}] HMM covariance matrix {i} is not positive-definite. "
+                                        "HMM predictions will use fallback regime."
+                                    )
+                                    self.hmm_valid = False
+                                    break
+                            else:
+                                self.hmm_valid = True
+                        except ImportError:
+                            # scipy not available, skip validation but mark as potentially valid
+                            logging.debug(f"[{self.exchange}] scipy not available, skipping HMM validation.")
+                            self.hmm_valid = True  # Assume valid, will fail at prediction if not
+                    else:
+                        self.hmm_valid = False
+                except Exception as e:
+                    logging.warning(f"[{self.exchange}] HMM validation failed: {e}. Will use fallback regime.")
+                    self.hmm_valid = False
+            else:
+                self.hmm_valid = False
+
             if self.regime_models and self.hmm_model and self.feature_names:
                 self.models_loaded = True
                 self.model_version = version
+                hmm_status = "valid" if self.hmm_valid else "invalid (using fallback)"
                 logging.info(
-                    "[%s] ✓ Models loaded (features=%s, selector=%s, version=%s)",
+                    "[%s] ✓ Models loaded (features=%s, selector=%s, hmm=%s, version=%s)",
                     self.exchange,
                     len(self.feature_names),
                     bool(self.feature_selector),
+                    hmm_status,
                     self.model_version or "<default>",
                 )
             else:
@@ -204,94 +236,44 @@ class MLSignalGenerator:
         except Exception as err:
             logging.warning("[%s] Selector transform failed: %s; using raw features.", self.exchange, err)
             return values
-    
-    def _transform_features_to_dataframe(self, feature_frame: pd.DataFrame) -> pd.DataFrame:
-        """Transform features and return as DataFrame to avoid sklearn warnings."""
-        if self.feature_selector is None:
-            return feature_frame
+
+    def _predict_regime_with_fallback(self, hmm_input: pd.DataFrame) -> int:
+        """
+        Predict regime using HMM with fallback to default regime if HMM fails.
+        Returns the predicted regime ID, or 0 (first available regime) if HMM fails.
+        """
+        if not self.hmm_valid or self.hmm_model is None:
+            # Fallback: use first available regime model, or 0 if none available
+            if self.regime_models:
+                default_regime = min(self.regime_models.keys())
+                return default_regime
+            return 0
         
         try:
-            # Transform using selector
-            transformed = self.feature_selector.transform(feature_frame.values)
-            if transformed.shape[1] == 0:
-                logging.warning("[%s] Feature selector returned 0 columns, using raw vector.", self.exchange)
-                return feature_frame
-            
-            # Get selected feature names if available
-            if hasattr(self.feature_selector, 'get_support'):
-                selected_indices = self.feature_selector.get_support(indices=True)
-                selected_features = [self.feature_names[i] for i in selected_indices if i < len(self.feature_names)]
+            # Try to predict using buffer if available
+            if len(self.regime_feature_buffer) >= 2:
+                buffer_array = np.array(list(self.regime_feature_buffer))
+                predicted_states = self.hmm_model.predict(buffer_array)
+                return int(predicted_states[-1])
             else:
-                # Fallback: use generic column names
-                selected_features = [f'feature_{i}' for i in range(transformed.shape[1])]
-            
-            # Create DataFrame with proper column names
-            return pd.DataFrame(transformed, columns=selected_features, index=feature_frame.index)
-        except Exception as err:
-            logging.warning("[%s] Selector transform failed: %s; using raw features.", self.exchange, err)
-            return feature_frame
-
-    def _fix_hmm_covariance(self):
-        """Fix HMM covariance matrices to be positive-definite."""
-        if self.hmm_model is None:
-            return False
-        
-        try:
-            # Fix covariance matrices for each state
-            if hasattr(self.hmm_model, 'covars_'):
-                min_covar = 1e-6  # Minimum covariance value
-                for i in range(len(self.hmm_model.covars_)):
-                    cov = self.hmm_model.covars_[i]
-                    # Make symmetric
-                    cov = (cov + cov.T) / 2
-                    # Add small diagonal to ensure positive-definite
-                    cov = cov + np.eye(cov.shape[0]) * min_covar
-                    # Ensure it's positive-definite using eigendecomposition
-                    eigenvals, eigenvecs = np.linalg.eigh(cov)
-                    eigenvals = np.maximum(eigenvals, min_covar)
-                    cov = eigenvecs @ np.diag(eigenvals) @ eigenvecs.T
-                    self.hmm_model.covars_[i] = cov
-                return True
-        except Exception as e:
-            logging.warning(f"[{self.exchange}] Failed to fix HMM covariance: {e}")
-            return False
-        return False
-
-    def _predict_regime_safe(self, hmm_input_data: np.ndarray) -> Optional[int]:
-        """Safely predict regime with error handling and covariance fixes."""
-        if self.hmm_model is None:
-            return None
-        
-        try:
-            # Try prediction first
-            predicted_states = self.hmm_model.predict(hmm_input_data)
-            regime = int(predicted_states[-1] if len(predicted_states) > 1 else predicted_states[0])
-            self.last_regime = regime
-            return regime
-        except (ValueError, LinAlgError) as e:
-            # Covariance matrix issue - try to fix and retry
-            logging.warning(f"[{self.exchange}] HMM prediction failed (covariance issue): {e}. Attempting fix...")
-            if self._fix_hmm_covariance():
-                try:
-                    predicted_states = self.hmm_model.predict(hmm_input_data)
-                    regime = int(predicted_states[-1] if len(predicted_states) > 1 else predicted_states[0])
-                    self.last_regime = regime
-                    logging.info(f"[{self.exchange}] HMM prediction succeeded after covariance fix")
-                    return regime
-                except Exception as e2:
-                    logging.warning(f"[{self.exchange}] HMM prediction still failed after fix: {e2}")
-            
-            # Fallback to last known regime or default
-            if self.last_regime is not None:
-                logging.warning(f"[{self.exchange}] Using last known regime {self.last_regime} as fallback")
-                return self.last_regime
-            
-            # Default to regime 0 if no history
-            logging.warning(f"[{self.exchange}] No regime history, defaulting to regime 0")
+                # Single-row prediction
+                predicted_states = self.hmm_model.predict(hmm_input.values)
+                return int(predicted_states[0])
+        except (ValueError, np.linalg.LinAlgError) as e:
+            # HMM prediction failed due to invalid covariance matrix
+            logging.warning(
+                f"[{self.exchange}] HMM prediction failed: {e}. Using fallback regime."
+            )
+            self.hmm_valid = False  # Mark as invalid to avoid repeated failures
+            # Return first available regime as fallback
+            if self.regime_models:
+                return min(self.regime_models.keys())
             return 0
         except Exception as e:
-            logging.error(f"[{self.exchange}] Unexpected error in HMM prediction: {e}", exc_info=True)
-            return self.last_regime if self.last_regime is not None else 0
+            logging.warning(f"[{self.exchange}] Unexpected HMM prediction error: {e}. Using fallback regime.")
+            if self.regime_models:
+                return min(self.regime_models.keys())
+            return 0
 
     def generate_signal(self, features_dict: Dict[str, Any]) -> Tuple[str, float, str, Dict]:
         """Generate a signal with enriched metadata and risk sizing."""
@@ -334,46 +316,23 @@ class MLSignalGenerator:
             current_regime_vector = hmm_input.values[0].tolist()
             self.regime_feature_buffer.append(current_regime_vector)
             
-            # Predict regime using sequence from buffer (HMMs are stateful)
-            # This utilizes the transition matrix logic of the HMM
-            if len(self.regime_feature_buffer) >= 2:
-                # Use the sequence for prediction (last state in sequence is the current regime)
-                buffer_array = np.array(list(self.regime_feature_buffer))
-                current_regime = self._predict_regime_safe(buffer_array)
-            else:
-                # Fallback to single-row prediction if buffer not yet filled
-                # (This can happen on first few predictions)
-                hmm_input_array = hmm_input.values
-                current_regime = self._predict_regime_safe(hmm_input_array)
-            
-            if current_regime is None:
-                return 'HOLD', 0.0, 'HMM regime prediction failed.', {}
+            # Predict regime using HMM with fallback handling
+            current_regime = self._predict_regime_with_fallback(hmm_input)
 
             regime_model = self.regime_models.get(current_regime)
             if regime_model is None:
                 return 'HOLD', 0.0, f'No model for regime {current_regime}.', {}
-            
-            # Transform features to DataFrame to avoid sklearn warnings about feature names
-            transformed_df = self._transform_features_to_dataframe(feature_frame)
-            probabilities = regime_model.predict_proba(transformed_df)[0]
+
+            transformed_vector = self._transform_features(feature_frame.values)
+            probabilities = regime_model.predict_proba(transformed_vector)[0]
             class_mapping = regime_model.classes_
-            predicted_class_encoded = class_mapping[int(np.argmax(probabilities))]
-            
-            # Map from encoded labels [0, 1, 2] back to original labels [-1, 0, 1]
-            # 0 -> -1 (SELL), 1 -> 0 (HOLD), 2 -> 1 (BUY)
-            if predicted_class_encoded == 0:
-                predicted_class = -1
-            elif predicted_class_encoded == 1:
-                predicted_class = 0
-            elif predicted_class_encoded == 2:
-                predicted_class = 1
-            else:
-                predicted_class = predicted_class_encoded  # Fallback for unexpected values
-            
+            predicted_class = class_mapping[int(np.argmax(probabilities))]
             confidence = float(np.max(probabilities))
             signal = SIGNAL_MAP.get(predicted_class, 'HOLD')
 
-            rationale = f"Regime {current_regime} | Confidence {confidence:.1%} | Signal {signal}"
+            # Indicate if using fallback regime
+            regime_note = " (fallback)" if not self.hmm_valid else ""
+            rationale = f"Regime {current_regime}{regime_note} | Confidence {confidence:.1%} | Signal {signal}"
 
             risk_payload = {'fraction': 0.0, 'recommended_lots': 0, 'kelly_fraction': 0.0}
             if signal != 'HOLD':
@@ -389,25 +348,17 @@ class MLSignalGenerator:
                     current_volatility=current_vol,
                 )
 
-            # Extract probabilities: class_mapping is [0, 1, 2] which maps to [-1, 0, 1]
-            # 0 -> -1 (SELL), 1 -> 0 (HOLD), 2 -> 1 (BUY)
-            buy_prob = 0.0
-            sell_prob = 0.0
-            if 2 in class_mapping:  # BUY (encoded as 2)
-                buy_prob = float(probabilities[list(class_mapping).index(2)])
-            if 0 in class_mapping:  # SELL (encoded as 0)
-                sell_prob = float(probabilities[list(class_mapping).index(0)])
-            
             metadata = {
                 'regime': current_regime,
-                'buy_prob': buy_prob,
-                'sell_prob': sell_prob,
+                'hmm_valid': self.hmm_valid,  # Indicate if HMM is working properly
+                'buy_prob': float(probabilities[list(class_mapping).index(1)]) if 1 in class_mapping else 0.0,
+                'sell_prob': float(probabilities[list(class_mapping).index(-1)]) if -1 in class_mapping else 0.0,
                 'position_size_frac': risk_payload.get('fraction', 0.0),
                 'kelly_fraction': risk_payload.get('kelly_fraction', 0.0),
                 'recommended_lots': risk_payload.get('recommended_lots', 0),
                 'confidence': confidence,
                 'rolling_accuracy': self._rolling_accuracy(),
-                'needs_retrain': self.needs_retrain,
+                'needs_retrain': self.needs_retrain or not self.hmm_valid,  # Flag retrain if HMM invalid
                 'last_feedback_at': self.last_feedback_timestamp.isoformat() if self.last_feedback_timestamp else None,
                 'model_version': self.model_version,
             }
@@ -446,7 +397,7 @@ class MLSignalGenerator:
         self.feedback_window.append(success)
         rolling_accuracy = self._rolling_accuracy()
         self.accuracy_history.append(rolling_accuracy)
-        self.last_feedback_timestamp = datetime.utcnow()
+        self.last_feedback_timestamp = now_ist()
         degrade_triggered = (
             len(self.feedback_window) == self.feedback_window.maxlen
             and rolling_accuracy < self.degrade_threshold
@@ -481,7 +432,7 @@ class MLSignalGenerator:
             direction = -1
         self.pending_predictions[signal_id] = {
             'direction': direction,
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': now_ist().isoformat(),
             'buy_prob': buy_prob,
             'sell_prob': sell_prob,
         }

@@ -18,11 +18,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.metrics import classification_report, f1_score
+from sklearn.preprocessing import LabelEncoder
 
 import database_new as db
 from feature_engineering import FeatureEngineeringError, REQUIRED_FEATURE_COLUMNS, prepare_training_features
 from train_model import RegimeHMMTransformer, define_triple_barrier_target
-from time_utils import today_ist, now_ist
+from time_utils import now_ist, today_ist
 
 try:  # Optional dependencies with graceful degradation
     import optuna  # type: ignore
@@ -113,6 +114,14 @@ class ModelFamily:
 
     def optuna_space(self, trial: "optuna.trial.Trial") -> Dict[str, Any]:
         return {}
+    
+    def encode_labels(self, y: np.ndarray) -> Tuple[np.ndarray, Optional[LabelEncoder]]:
+        """Encode labels if needed. Returns (encoded_y, encoder). Default: no encoding."""
+        return y, None
+    
+    def decode_labels(self, y: np.ndarray, encoder: Optional[LabelEncoder]) -> np.ndarray:
+        """Decode labels if needed. Default: no decoding."""
+        return y
 
 
 class LightGBMFamily(ModelFamily):
@@ -163,7 +172,7 @@ class XGBoostFamily(ModelFamily):
     def default_params(self) -> Dict[str, Any]:
         return {
             "objective": "multi:softprob",
-            "num_class": 3,
+            # num_class removed - XGBoost will infer from data (handles [-1, 0, 1] labels)
             "n_estimators": 400,
             "max_depth": 6,
             "learning_rate": 0.05,
@@ -191,6 +200,21 @@ class XGBoostFamily(ModelFamily):
             "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 3.0),
             "n_estimators": trial.suggest_int("n_estimators", 200, 600, step=100),
         }
+    
+    def encode_labels(self, y: np.ndarray) -> Tuple[np.ndarray, Optional[LabelEncoder]]:
+        """Encode labels from [-1, 0, 1] to [0, 1, 2] for XGBoost compatibility."""
+        encoder = LabelEncoder()
+        # Fit on sorted unique values to ensure consistent mapping: [-1, 0, 1] -> [0, 1, 2]
+        unique_labels = np.sort(np.unique(y))
+        encoder.fit(unique_labels)
+        encoded_y = encoder.transform(y)
+        return encoded_y, encoder
+    
+    def decode_labels(self, y: np.ndarray, encoder: Optional[LabelEncoder]) -> np.ndarray:
+        """Decode labels from [0, 1, 2] back to [-1, 0, 1]."""
+        if encoder is None:
+            return y
+        return encoder.inverse_transform(y)
 
 
 class CatBoostFamily(ModelFamily):
@@ -309,15 +333,7 @@ def _prepare_xy(frame: pd.DataFrame, features: Sequence[str]) -> Tuple[np.ndarra
     feature_cols = [col for col in features if col in frame.columns]
     X = frame[feature_cols].values.astype(np.float32)
     y = frame['target'].values.astype(int)
-    
-    # Map target labels from [-1, 0, 1] to [0, 1, 2] for XGBoost compatibility
-    # -1 (SELL) -> 0, 0 (HOLD) -> 1, 1 (BUY) -> 2
-    y_encoded = y.copy()
-    y_encoded[y == -1] = 0
-    y_encoded[y == 0] = 1
-    y_encoded[y == 1] = 2
-    
-    return X, y_encoded
+    return X, y
 
 
 def _run_optuna(
@@ -332,12 +348,22 @@ def _run_optuna(
     if trials <= 0 or optuna is None:
         return base_params, None
 
+    # Encode labels if needed (e.g., for XGBoost)
+    y_train_encoded, label_encoder = family.encode_labels(y_train)
+    # Use the same encoder for validation labels
+    if label_encoder is not None:
+        y_val_encoded = label_encoder.transform(y_val)
+    else:
+        y_val_encoded = y_val
+
     def objective(trial: "optuna.trial.Trial") -> float:
         params = base_params.copy()
         params.update(family.optuna_space(trial))
         model = family.build_model(params)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_val)
+        model.fit(X_train, y_train_encoded)
+        preds_encoded = model.predict(X_val)
+        # Decode predictions for evaluation (compare against original y_val)
+        preds = family.decode_labels(preds_encoded, label_encoder)
         score = f1_score(y_val, preds, average='macro')
         return float(score)
 
@@ -400,9 +426,19 @@ def run_orchestrator(config: OrchestratorConfig) -> Dict[str, Any]:
             base_params = family.default_params()
             tuned_params, optuna_score = _run_optuna(family, X_train, y_train, X_val, y_val, base_params, config.optuna_trials)
 
+            # Encode labels if needed (e.g., for XGBoost)
+            y_train_encoded, label_encoder = family.encode_labels(y_train)
+            # Use the same encoder for validation labels
+            if label_encoder is not None:
+                y_val_encoded = label_encoder.transform(y_val)
+            else:
+                y_val_encoded = y_val
+
             model = family.build_model(tuned_params)
-            model.fit(X_train, y_train)
-            preds = model.predict(X_val)
+            model.fit(X_train, y_train_encoded)
+            preds_encoded = model.predict(X_val)
+            # Decode predictions for evaluation
+            preds = family.decode_labels(preds_encoded, label_encoder)
 
             report = classification_report(y_val, preds, zero_division=0, output_dict=True)
             metrics = {

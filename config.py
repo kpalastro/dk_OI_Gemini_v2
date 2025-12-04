@@ -120,9 +120,9 @@ class AppConfig:
     ml_signal_cooldown_seconds: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_ML_SIGNAL_COOLDOWN_SECONDS', 0))
     min_confidence_for_trade: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_MIN_CONFIDENCE_FOR_TRADE', 0.60))
     auto_exec_enabled: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_AUTO_EXEC_ENABLED', True))
-    auto_exec_min_kelly_fraction: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_AUTO_EXEC_MIN_KELLY_FRACTION', 0.05))
-    auto_exec_max_position_size_lots: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_MAX_POSITION_SIZE_LOTS', 1))
-    auto_exec_max_net_delta: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_AUTO_EXEC_MAX_NET_DELTA', 0.0))
+    auto_exec_min_kelly_fraction: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_AUTO_EXEC_MIN_KELLY_FRACTION', 0.2))
+    auto_exec_max_position_size_lots: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_MAX_POSITION_SIZE_LOTS', 4))
+    auto_exec_max_net_delta: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_AUTO_EXEC_MAX_NET_DELTA', 3.0))
     auto_exec_session_drawdown_stop: float = field(default_factory=lambda: _get_env_float('OI_TRACKER_AUTO_EXEC_SESSION_DRAWDOWN_STOP', 0.0))
     
     # Position Limit Controls
@@ -134,7 +134,7 @@ class AppConfig:
     auto_exec_cooldown_with_positions_seconds: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_COOLDOWN_WITH_POSITIONS', 300))
     
     # End-of-Day Position Management
-    auto_exec_close_all_positions_eod: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_AUTO_EXEC_CLOSE_ALL_POSITIONS_EOD', False))
+    auto_exec_close_all_positions_eod: bool = field(default_factory=lambda: _get_env_bool('OI_TRACKER_AUTO_EXEC_CLOSE_ALL_POSITIONS_EOD', True))
     auto_exec_eod_exit_time_hour: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_EOD_EXIT_TIME_HOUR', 15))
     auto_exec_eod_exit_time_minute: int = field(default_factory=lambda: _get_env_int('OI_TRACKER_AUTO_EXEC_EOD_EXIT_TIME_MINUTE', 20))
     

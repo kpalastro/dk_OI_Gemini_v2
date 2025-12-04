@@ -294,6 +294,8 @@ def initialize_database():
                     macro_spread DOUBLE PRECISION,
                     risk_on_score DOUBLE PRECISION,
                     metadata TEXT,
+                    news_sentiment_score DOUBLE PRECISION,
+                    news_sentiment_summary TEXT,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
                 ''',
@@ -621,6 +623,10 @@ def migrate_database():
                 if 'news_sentiment_score' not in macro_cols:
                     cursor.execute('ALTER TABLE macro_signals ADD COLUMN news_sentiment_score DOUBLE PRECISION')
                     logging.info("Added column news_sentiment_score to macro_signals")
+                
+                if 'news_sentiment_summary' not in macro_cols:
+                    cursor.execute('ALTER TABLE macro_signals ADD COLUMN news_sentiment_summary TEXT')
+                    logging.info("Added column news_sentiment_summary to macro_signals")
 
                 # Add missing columns to ml_features
                 ml_feature_cols = [
@@ -709,6 +715,10 @@ def migrate_database():
                 if 'news_sentiment_score' not in macro_cols:
                     cursor.execute('ALTER TABLE macro_signals ADD COLUMN news_sentiment_score REAL')
                     logging.info("Added column news_sentiment_score to macro_signals")
+                
+                if 'news_sentiment_summary' not in macro_cols:
+                    cursor.execute('ALTER TABLE macro_signals ADD COLUMN news_sentiment_summary TEXT')
+                    logging.info("Added column news_sentiment_summary to macro_signals")
 
                 # Add missing columns to ml_features
                 ml_feature_cols = [

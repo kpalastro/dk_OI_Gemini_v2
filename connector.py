@@ -195,6 +195,7 @@ class Connector:
         self._subscription_lock = Lock()
         self._reconnect_attempts = 0
         self._shutting_down = False  # Flag to prevent reconnection during shutdown
+        self._connection_established = False  # Flag set by _on_connect callback
         
     def initialize_kite(self, twofa_code: Optional[str] = None) -> KiteApp:
         """Initialize and authenticate Kite session."""
@@ -230,81 +231,113 @@ class Connector:
         logging.info(f"✓ Connected as: {self.kite.user_id} ({profile.get('user_name')})")
         return self.kite
     
-    def connect_websocket(self, timeout_seconds: int = 30) -> bool:
-        """Connect WebSocket with progressive backoff retry logic."""
+    def connect_websocket(self, timeout_seconds: int = 30, max_attempts: int = 2) -> bool:
+        """Connect WebSocket with progressive backoff retry logic.
+        
+        - Tries up to `max_attempts` connection attempts.
+        - Between attempts, closes any stale WebSocket instance and waits briefly.
+        - Returns False only if all attempts fail.
+        """
         if not self.kite:
             raise RuntimeError("Kite session not initialized. Call initialize_kite() first.")
         
-        # Reset shutdown flag for new connection
+        # Reset shutdown flag and connection flag for new connection
         self._shutting_down = False
+        self._connection_established = False
         
-        if self.kws and self.kws.is_connected():
+        if self.kws and (self._connection_established or self.kws.is_connected()):
             logging.info("WebSocket already connected")
             return True
         
         self._reconnect_attempts = 0
         
-        logging.info("=" * 70)
-        logging.info("🔌 Initializing WebSocket Connection")
-        logging.info("=" * 70)
-        
-        try:
-            # Log connection attempt details
-            logging.info(f"Connecting with user_id: {self.kite.user_id}")
-            logging.info(f"Enctoken length: {len(self.kite.enctoken) if self.kite.enctoken else 0}")
+        for attempt_index in range(1, max_attempts + 1):
+            logging.info("=" * 70)
+            logging.info(f"🔌 Initializing WebSocket Connection (attempt {attempt_index}/{max_attempts})")
+            logging.info("=" * 70)
             
-            self.kws = KiteTicker(
-                api_key="TradeViaPython",
-                access_token=self.kite.enctoken + "&user_id=" + self.kite.user_id
-            )
-            
-            self.kws.on_ticks = self._on_ticks
-            self.kws.on_connect = self._on_connect
-            self.kws.on_error = self._on_error
-            self.kws.on_close = self._on_close
-            
-            logging.info("Calling kws.connect(threaded=True)...")
-            self.kws.connect(threaded=True)
-            logging.info("kws.connect() called, waiting for connection...")
-            
-            start_time = time.time()
-            attempt = 0
-            last_log_time = start_time
-            
-            while time.time() - start_time < timeout_seconds:
-                elapsed = time.time() - start_time
+            try:
+                # Clean up any existing, possibly stale WebSocket instance
+                if self.kws:
+                    try:
+                        if self.kws.is_connected():
+                            self.kws.close()
+                            time.sleep(0.5)
+                    except Exception:
+                        # Ignore cleanup errors; we'll replace kws below
+                        pass
+                    finally:
+                        self.kws = None
                 
-                # Log progress every 5 seconds
-                if elapsed - (last_log_time - start_time) >= 5:
-                    logging.info(f"Waiting for WebSocket connection... ({elapsed:.1f}s / {timeout_seconds}s)")
-                    last_log_time = time.time()
+                # Validate we have valid credentials before creating KiteTicker
+                if not self.kite or not self.kite.enctoken:
+                    raise RuntimeError("Kite session not properly initialized - missing enctoken")
                 
-                # Check connection status
+                logging.info("Creating KiteTicker instance...")
+                self.kws = KiteTicker(
+                    api_key="TradeViaPython",
+                    access_token=self.kite.enctoken + "&user_id=" + self.kite.user_id
+                )
+                
+                logging.info("Setting up KiteTicker callbacks...")
+                self.kws.on_ticks = self._on_ticks
+                self.kws.on_connect = self._on_connect
+                self.kws.on_error = self._on_error
+                self.kws.on_close = self._on_close
+                
+                # Reset connection flag before attempting connection
+                self._connection_established = False
+                
+                logging.info("Calling kws.connect(threaded=True)...")
                 try:
-                    if self.kws and self.kws.is_connected():
-                        logging.info(f"✓ WebSocket connected successfully after {elapsed:.1f} seconds")
+                    self.kws.connect(threaded=True)
+                    logging.info("kws.connect() call completed (connection is asynchronous)")
+                except Exception as connect_ex:
+                    logging.error(f"Exception during kws.connect(): {connect_ex}", exc_info=True)
+                    raise
+                
+                start_time = time.time()
+                wait_step = 0
+                while time.time() - start_time < timeout_seconds:
+                    # Check both the callback flag and is_connected() for reliability
+                    if self._connection_established or (self.kws and self.kws.is_connected()):
+                        logging.info("✓ WebSocket connected successfully")
                         self._reconnect_attempts = 0
                         return True
-                except Exception as check_error:
-                    logging.debug(f"Error checking connection status: {check_error}")
+                    
+                    # Log progress every 5 seconds
+                    elapsed = time.time() - start_time
+                    if wait_step % 10 == 0 and elapsed > 5:
+                        logging.debug(
+                            f"Waiting for WebSocket connection... "
+                            f"({elapsed:.1f}s elapsed, "
+                            f"callback_flag={self._connection_established}, "
+                            f"is_connected={self.kws.is_connected() if self.kws else 'N/A'})"
+                        )
+                    
+                    wait_time = min(0.5 + (wait_step * 0.5), 2.0)
+                    time.sleep(wait_time)
+                    wait_step += 1
                 
-                wait_time = min(0.5 + (attempt * 0.5), 2.0)
-                time.sleep(wait_time)
-                attempt += 1
+                logging.warning(
+                    f"✗ WebSocket attempt {attempt_index}/{max_attempts} "
+                    f"failed to connect within {timeout_seconds} seconds"
+                )
+            except Exception as e:
+                logging.error(
+                    f"WebSocket connection error on attempt {attempt_index}/{max_attempts}: {e}",
+                    exc_info=True
+                )
             
-            elapsed = time.time() - start_time
-            logging.error(f"✗ WebSocket failed to connect within {timeout_seconds} seconds (waited {elapsed:.1f}s)")
-            logging.error(f"Connection state: kws exists={self.kws is not None}")
-            if self.kws:
-                try:
-                    logging.error(f"is_connected()={self.kws.is_connected()}")
-                except Exception as e:
-                    logging.error(f"Error checking is_connected(): {e}")
-            return False
-            
-        except Exception as e:
-            logging.error(f"WebSocket connection error: {e}", exc_info=True)
-            return False
+            # If not last attempt, wait a bit before retrying
+            if attempt_index < max_attempts:
+                time.sleep(3.0)
+        
+        logging.error(
+            f"✗ WebSocket failed to connect after {max_attempts} attempts "
+            f"(each {timeout_seconds} seconds)"
+        )
+        return False
     
     def _on_ticks(self, ws, ticks):
         if self.on_tick_callback:
@@ -319,8 +352,11 @@ class Connector:
             logging.debug("WebSocket connection attempt during shutdown (ignoring)")
             return
         
+        # Set connection flag immediately when callback fires
+        self._connection_established = True
+        
         logging.info("=" * 70)
-        logging.info("✓ WebSocket connected")
+        logging.info("✓ WebSocket connected (on_connect callback fired)")
         logging.info("=" * 70)
         
         self._reconnect_attempts = 0
@@ -371,15 +407,20 @@ class Connector:
         if self._shutting_down:
             logging.debug(f"WebSocket error {code} during shutdown (ignoring): {reason}")
             return
+        # Log errors more prominently during connection attempts
         if code == 1006:
             logging.warning(f"WebSocket connection error {code}: {reason} (will retry automatically)")
         else:
             logging.error(f"WebSocket error {code}: {reason}")
+        # Reset connection flag on error
+        self._connection_established = False
     
     def _on_close(self, ws, code, reason):
         if self._shutting_down:
             logging.debug(f"WebSocket closed during shutdown (code {code}): {reason}")
             return
+        # Reset connection flag on close
+        self._connection_established = False
         if code == 1006:
             logging.warning(f"WebSocket closed uncleanly (code {code}): {reason}. Retrying...")
         else:

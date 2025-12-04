@@ -8,43 +8,22 @@
     <style>
         body {
             background: #0f0f23;
-            color: #ffffff;
+            color: #f7fafc;
             min-height: 100vh;
-            font-size: 14px;
-        }
-        h1, h2, h3, h4, h5, h6 {
-            color: #ffffff !important;
-            font-weight: 600;
         }
         .card {
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.08);
             backdrop-filter: blur(8px);
         }
-        .card-title {
-            color: #ffffff !important;
-            font-size: 1.1rem;
-            font-weight: 600;
-        }
-        .card-body {
-            color: #ffffff;
-        }
         .metric-label {
-            font-size: 0.85rem;
+            font-size: 0.75rem;
             text-transform: uppercase;
-            color: #e2e8f0;
-            font-weight: 500;
-            letter-spacing: 0.5px;
-            margin-bottom: 0.25rem;
+            color: #cbd5f5;
         }
         .metric-value {
-            font-size: 1.4rem;
+            font-size: 1.3rem;
             font-weight: 600;
-            color: #ffffff;
-        }
-        .text-muted {
-            color: #cbd5e0 !important;
-            font-size: 0.9rem;
         }
         .heatmap-row {
             display: flex;
@@ -61,37 +40,14 @@
         }
         .heatmap-label {
             width: 60px;
-            font-size: 0.85rem;
+            font-size: 0.75rem;
             text-transform: uppercase;
-            color: #e2e8f0;
-            font-weight: 500;
+            color: #a0aec0;
         }
         .table-dark {
             --bs-table-bg: rgba(255, 255, 255, 0.04);
             --bs-table-striped-bg: rgba(255, 255, 255, 0.07);
-            color: #ffffff !important;
-        }
-        .table-dark th {
-            color: #ffffff !important;
-            font-weight: 600;
-            font-size: 0.9rem;
-        }
-        .table-dark td {
-            color: #ffffff !important;
-            font-size: 0.9rem;
-        }
-        .btn-outline-light {
-            color: #ffffff;
-            border-color: rgba(255, 255, 255, 0.3);
-        }
-        .btn-outline-light:hover {
-            background-color: rgba(255, 255, 255, 0.1);
-            color: #ffffff;
-            border-color: rgba(255, 255, 255, 0.5);
-        }
-        small {
-            color: #cbd5e0 !important;
-            font-size: 0.85rem;
+            color: #f7fafc;
         }
     </style>
 </head>
@@ -183,7 +139,7 @@
             const container = document.getElementById('healthCards');
             const entries = Object.entries(data);
             if (!entries.length) {
-                container.innerHTML = '<p class="text-muted" style="color:#e2e8f0 !important;font-weight:500">No diagnostics found.</p>';
+                container.innerHTML = '<p class="text-muted">No diagnostics found.</p>';
                 return;
             }
 
@@ -263,8 +219,8 @@
 
             if (!datasets.length) {
                 const ctx = document.getElementById('cvChart').getContext('2d');
-                ctx.font = 'bold 14px sans-serif';
-                ctx.fillStyle = '#e2e8f0';
+                ctx.font = '14px sans-serif';
+                ctx.fillStyle = '#a0aec0';
                 ctx.fillText('No CV data available', 20, 40);
                 return;
             }
@@ -276,14 +232,14 @@
                     responsive: true,
                     scales: {
                         y: {
-                            ticks: { color: '#ffffff', font: { size: 12, weight: '500' }, callback: value => value + '%' },
+                            ticks: { color: '#cbd5f5', callback: value => value + '%' },
                             beginAtZero: true,
                             max: 100
                         },
-                        x: { ticks: { color: '#ffffff', font: { size: 12, weight: '500' } } }
+                        x: { ticks: { color: '#cbd5f5' } }
                     },
                     plugins: {
-                        legend: { labels: { color: '#ffffff', font: { size: 12, weight: '500' } } }
+                        legend: { labels: { color: '#f7fafc' } }
                     }
                 }
             });
@@ -315,8 +271,8 @@
                 });
             });
             if (!datasets.length) {
-                ctx.font = 'bold 14px sans-serif';
-                ctx.fillStyle = '#e2e8f0';
+                ctx.font = '14px sans-serif';
+                ctx.fillStyle = '#a0aec0';
                 ctx.fillText('Run a backtest via backtesting/run.py to populate equity curves.', 20, 40);
                 return;
             }
@@ -328,12 +284,12 @@
                     interaction: { mode: 'index', intersect: false },
                     scales: {
                         y: {
-                            ticks: { color: '#ffffff', font: { size: 12, weight: '500' }, callback: value => '₹' + value },
+                            ticks: { color: '#cbd5f5', callback: value => '₹' + value },
                             beginAtZero: true,
                         },
-                        x: { ticks: { color: '#ffffff', font: { size: 12, weight: '500' } } }
+                        x: { ticks: { color: '#cbd5f5' } }
                     },
-                    plugins: { legend: { labels: { color: '#ffffff', font: { size: 12, weight: '500' } } } }
+                    plugins: { legend: { labels: { color: '#f7fafc' } } }
                 }
             });
         }
@@ -346,7 +302,7 @@
                     return `
                         <div class="heatmap-row">
                             <div class="heatmap-label">${exchange}</div>
-                            <span style="width:auto;color:#e2e8f0;font-weight:500">No feedback yet</span>
+                            <span style="width:auto;color:#a0aec0">No feedback yet</span>
                         </div>`;
                 }
                 const boxes = history.map(value => {
@@ -383,7 +339,7 @@
             });
             body.innerHTML = rows.length ? rows.join('') : `
                 <tr>
-                    <td colspan="6" class="text-muted" style="color:#e2e8f0 !important;font-weight:500">Run train_orchestrator.py to populate walk-forward results.</td>
+                    <td colspan="6" class="text-muted">Run train_orchestrator.py to populate walk-forward results.</td>
                 </tr>`;
         }
 
