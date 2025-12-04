@@ -38,7 +38,6 @@ from monitoring import monitoring_bp
 from feature_engineering import FeatureEngineeringError, engineer_live_feature_set
 from ml_core import MLSignalGenerator
 from online_learning import FeedbackSummary, OnlineLearningService
-from metrics.phase2_metrics import get_metrics_collector
 from handlers import ExchangeDataHandler, HandlerSnapshotProxy
 from jobs import FeatureJob, ResultJob
 from app_manager import AppManager
@@ -61,6 +60,19 @@ def _resolve_macro_exchange(exchange: str) -> str:
     if exchange.upper().startswith('BSE'):
         return 'BSE'
     return exchange.upper()
+
+
+def _safe_get_metrics_collector(exchange: str):
+    """
+    Safely get metrics collector with lazy import.
+    Returns None if import fails (e.g., metrics module not available).
+    """
+    try:
+        from metrics.phase2_metrics import get_metrics_collector
+        return get_metrics_collector(exchange)
+    except (ImportError, AttributeError) as e:
+        logging.debug(f"Metrics collector not available for {exchange}: {e}")
+        return None
 
 
 def _get_market_times_ist(target_date: date) -> Tuple[datetime, datetime]:
@@ -408,13 +420,14 @@ def _system_health_loop():
 
             for ex in DISPLAY_EXCHANGES:
                 try:
-                    collector = get_metrics_collector(ex)
-                    collector.record_system_health(
-                        memory_mb=memory_mb,
-                        cpu_pct=cpu_pct,
-                        db_size_mb=None,
-                        error_count=0,
-                    )
+                    collector = _safe_get_metrics_collector(ex)
+                    if collector:
+                        collector.record_system_health(
+                            memory_mb=memory_mb,
+                            cpu_pct=cpu_pct,
+                            db_size_mb=None,
+                            error_count=0,
+                        )
                 except Exception as exc_inner:
                     logging.debug(f"[{ex}] System health metrics failed: {exc_inner}")
         except Exception as exc:
@@ -798,16 +811,17 @@ class FeatureWorker(MpProcess):
                     ml_rationale = rationale
                     ml_metadata = metadata
 
-                    collector = get_metrics_collector(exchange)
-                    try:
-                        collector.record_model_performance(
-                            signal=signal,
-                            confidence=confidence,
-                            source=metadata.get('regime', 'lightgbm'),
-                            metadata=metadata
-                        )
-                    except Exception as me:
-                        logging.debug(f"[{exchange}] Metrics recording failed: {me}")
+                    collector = _safe_get_metrics_collector(exchange)
+                    if collector:
+                        try:
+                            collector.record_model_performance(
+                                signal=signal,
+                                confidence=confidence,
+                                source=metadata.get('regime', 'lightgbm'),
+                                metadata=metadata
+                            )
+                        except Exception as me:
+                            logging.debug(f"[{exchange}] Metrics recording failed: {me}")
 
                     # Log high-level recommendation for audit and research
                     if signal != 'HOLD':
@@ -1397,18 +1411,19 @@ def feature_result_consumer():
                         logging.error(f"[{result.exchange}] Database save failed: {db_exc}")
 
                     try:
-                        collector = get_metrics_collector(result.exchange)
-                        macro_available = bool(handler.macro_feature_cache)
-                        depth_captured = bool(
-                            result.ml_features.get('depth_buy_total', 0) > 0 or
-                            result.ml_features.get('depth_sell_total', 0) > 0
-                        )
-                        collector.record_data_quality(
-                            macro_available=macro_available,
-                            depth_captured=depth_captured,
-                            feature_engineering_success=bool(result.ml_features),
-                            db_write_success=db_write_success
-                        )
+                        collector = _safe_get_metrics_collector(result.exchange)
+                        if collector:
+                            macro_available = bool(handler.macro_feature_cache)
+                            depth_captured = bool(
+                                result.ml_features.get('depth_buy_total', 0) > 0 or
+                                result.ml_features.get('depth_sell_total', 0) > 0
+                            )
+                            collector.record_data_quality(
+                                macro_available=macro_available,
+                                depth_captured=depth_captured,
+                                feature_engineering_success=bool(result.ml_features),
+                                db_write_success=db_write_success
+                            )
                     except Exception as me:
                         logging.debug(f"[{result.exchange}] Data quality metrics failed: {me}")
             except Exception as e:
@@ -3033,18 +3048,19 @@ def close_position(handler: ExchangeDataHandler, pos_id: str, exit_reason: str,
 
         # Record Phase 2 paper trading metrics for realised PnL
         try:
-            lots = int(position.get('qty', 0) / 50) if position.get('qty') else 0
-            confidence = float(position.get('confidence', 0.0))
-            collector = get_metrics_collector(handler.exchange)
-            collector.record_paper_trading(
-                executed=True,
-                reason=exit_reason,
-                signal='BUY' if position.get('side') == 'B' else 'SELL',
-                confidence=confidence,
-                quantity_lots=lots,
-                pnl=realized_pnl,
-                constraint_violation=False,
-            )
+            collector = _safe_get_metrics_collector(handler.exchange)
+            if collector:
+                lots = int(position.get('qty', 0) / 50) if position.get('qty') else 0
+                confidence = float(position.get('confidence', 0.0))
+                collector.record_paper_trading(
+                    executed=True,
+                    reason=exit_reason,
+                    signal='BUY' if position.get('side') == 'B' else 'SELL',
+                    confidence=confidence,
+                    quantity_lots=lots,
+                    pnl=realized_pnl,
+                    constraint_violation=False,
+                )
         except Exception as exc:
             logging.debug(f"[{handler.exchange}] Paper trading exit metrics failed: {exc}")
         
