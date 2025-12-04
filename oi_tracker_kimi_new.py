@@ -3887,16 +3887,32 @@ def load_open_positions():
         
         # Update position counters
         for ex in ALL_EXCHANGES:
-            max_id = max(
-                (int(pid.split('_P')[1]) for pid in df['position_id'].dropna() 
-                 if pid.startswith(ex)),
-                default=0
-            )
+            def _extract_counter(pid: str) -> Optional[int]:
+                try:
+                    if not isinstance(pid, str):
+                        return None
+                    if not pid.startswith(ex):
+                        return None
+                    parts = pid.split('_P')
+                    if len(parts) < 2:
+                        return None
+                    suffix = parts[1]
+                    if not suffix.isdigit():
+                        return None
+                    return int(suffix)
+                except Exception:
+                    return None
+
+            counters = [
+                c for c in (_extract_counter(pid) for pid in df['position_id'].dropna())
+                if c is not None
+            ]
+            max_id = max(counters) if counters else 0
             exchange_handlers[ex].position_counter = max_id
         
         logging.info(f"✓ Reloaded {len(open_trades)} open positions")
     except Exception as e:
-        logging.error(f"Error loading open positions: {e}")
+        logging.error(f"Error loading open positions: {e}", exc_info=True)
 
 from data_ingestion.macro_loader import find_macro_tokens, fetch_fii_dii_data
 from database_new import save_macro_signals, get_latest_macro_signals, get_historical_macro_signals, get_latest_macro_price_row

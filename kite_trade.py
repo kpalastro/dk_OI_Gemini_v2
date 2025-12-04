@@ -1,17 +1,22 @@
 import os
+import logging
+
 try:
     import requests
 except ImportError:
     os.system('python -m pip install requests')
+    import requests  # type: ignore
 try:
     import dateutil
 except ImportError:
     os.system('python -m pip install python-dateutil')
+    import dateutil  # type: ignore
 
 
 import requests
 import dateutil.parser
 
+LOGGER = logging.getLogger(__name__)
 
 def get_enctoken(userid, password, twofa):
     session = requests.Session()
@@ -87,18 +92,61 @@ class KiteApp:
         return Exchange
 
     def historical_data(self, instrument_token, from_date, to_date, interval, continuous=False, oi=False):
-        params = {"from": from_date,
-                  "to": to_date,
-                  "interval": interval,
-                  "continuous": 1 if continuous else 0,
-                  "oi": 1 if oi else 0}
-        lst = self.session.get(
-            f"{self.root_url}/instruments/historical/{instrument_token}/{interval}", params=params,
-            headers=self.headers).json()["data"]["candles"]
+        """
+        Fetch historical candle data from Kite.
+
+        This version is defensive against unexpected or error responses from the API,
+        avoiding `'NoneType' object is not subscriptable` crashes and providing
+        clearer logging for debugging.
+        """
+        params = {
+            "from": from_date,
+            "to": to_date,
+            "interval": interval,
+            "continuous": 1 if continuous else 0,
+            "oi": 1 if oi else 0,
+        }
+
+        url = f"{self.root_url}/instruments/historical/{instrument_token}/{interval}"
+
+        try:
+            resp = self.session.get(url, params=params, headers=self.headers)
+        except Exception as exc:
+            LOGGER.error(f"Kite historical_data request failed: {exc}")
+            raise
+
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            LOGGER.error(
+                "Kite historical_data JSON parse failed: status=%s, text=%s",
+                resp.status_code,
+                resp.text[:500],
+            )
+            raise
+
+        if not isinstance(payload, dict):
+            LOGGER.error("Kite historical_data unexpected payload type: %r", type(payload))
+            raise TypeError(f"Unexpected payload type from Kite: {type(payload)}")
+
+        data = payload.get("data")
+        if not data or "candles" not in data or data["candles"] is None:
+            LOGGER.error("Kite historical_data missing 'candles' in response: %s", payload)
+            # Return empty list so callers can handle "no data" gracefully.
+            return []
+
+        lst = data["candles"]
+
         records = []
         for i in lst:
-            record = {"date": dateutil.parser.parse(i[0]), "open": i[1], "high": i[2], "low": i[3],
-                      "close": i[4], "volume": i[5],}
+            record = {
+                "date": dateutil.parser.parse(i[0]),
+                "open": i[1],
+                "high": i[2],
+                "low": i[3],
+                "close": i[4],
+                "volume": i[5],
+            }
             if len(i) == 7:
                 record["oi"] = i[6]
             records.append(record)
