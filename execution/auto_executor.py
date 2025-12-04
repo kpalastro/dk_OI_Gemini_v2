@@ -8,15 +8,29 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 from time_utils import now_ist
 
 from execution.strategy_router import StrategySignal
 from risk_manager import get_optimal_position_size
-from metrics.phase2_metrics import get_metrics_collector
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _safe_get_metrics_collector(exchange: str):
+    """
+    Safely get metrics collector with lazy import.
+
+    This avoids crashing the app on environments where the `metrics`
+    package is shadowed or unavailable. Returns None if import fails.
+    """
+    try:
+        from metrics.phase2_metrics import get_metrics_collector  # type: ignore
+        return get_metrics_collector(exchange)
+    except (ImportError, AttributeError) as exc:
+        LOGGER.debug(f"[{exchange}] Metrics collector not available: {exc}")
+        return None
 
 
 @dataclass
@@ -74,16 +88,17 @@ class AutoExecutor:
         This helper is best-effort and never raises.
         """
         try:
-            collector = get_metrics_collector(self.exchange)
-            collector.record_paper_trading(
-                executed=executed,
-                reason=reason,
-                signal=signal.signal,
-                confidence=signal.confidence,
-                quantity_lots=quantity_lots,
-                pnl=pnl,
-                constraint_violation=constraint_violation,
-            )
+            collector = _safe_get_metrics_collector(self.exchange)
+            if collector:
+                collector.record_paper_trading(
+                    executed=executed,
+                    reason=reason,
+                    signal=signal.signal,
+                    confidence=signal.confidence,
+                    quantity_lots=quantity_lots,
+                    pnl=pnl,
+                    constraint_violation=constraint_violation,
+                )
         except Exception as exc:
             LOGGER.debug(f"[{self.exchange}] Paper trading metrics failed: {exc}")
     
